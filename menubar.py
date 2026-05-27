@@ -226,8 +226,9 @@ class DashboardMenubar(rumps.App):
         )
 
         # ── Actions ────────────────────────────────────
-        self.refresh_btn = rumps.MenuItem(
-            "Dernière mise à jour : —", callback=self.manual_refresh
+        self.last_updated_btn = rumps.MenuItem(
+            "Dernière mise à jour : —",
+            callback=_open_in_browser(f"file://{DATA_FILE}"),
         )
         self.mail_clear_btn = rumps.MenuItem(
             "Marquer les mails comme lus", callback=self.clear_gmail_local
@@ -246,7 +247,7 @@ class DashboardMenubar(rumps.App):
             self.mail_from,
             self.mail_subject,
             None,
-            self.refresh_btn,
+            self.last_updated_btn,
             self.mail_clear_btn,
             self.force_update_btn,
             None,
@@ -269,10 +270,6 @@ class DashboardMenubar(rumps.App):
                 time.sleep(REFRESH_INTERVAL)
 
         threading.Thread(target=loop, daemon=True).start()
-
-    def manual_refresh(self, _: object) -> None:
-        """Relecture manuelle du JSON depuis le menu."""
-        threading.Thread(target=self.refresh_data, daemon=True).start()
 
     def clear_gmail_local(self, _: object) -> None:
         """Marque les mails comme « lus » côté interface seulement.
@@ -399,7 +396,7 @@ class DashboardMenubar(rumps.App):
                 self.refresh_data()
                 send_notification(
                     title="✅ Dashboard mis à jour",
-                    message=f"Gmail: {unread_gmail} · Cal: {len(next_events)} événement{'s' if len(next_events) > 1 else ''}",
+                    message="",
                 )
             except Exception as exc:
                 send_notification("⚠️ Erreur mise à jour", str(exc)[:150])
@@ -472,11 +469,11 @@ class DashboardMenubar(rumps.App):
         if last_upd:
             try:
                 dt_upd: datetime = datetime.fromisoformat(last_upd)
-                self.refresh_btn.title = f"Dernière mise à jour : {dt_upd.strftime('%H:%M')}"
+                self.last_updated_btn.title = f"Dernière mise à jour : {dt_upd.strftime('%H:%M')}"
             except (ValueError, TypeError):
-                self.refresh_btn.title = "Dernière mise à jour : —"
+                self.last_updated_btn.title = "Dernière mise à jour : —"
         else:
-            self.refresh_btn.title = "Dernière mise à jour : —"
+            self.last_updated_btn.title = "Dernière mise à jour : —"
 
     def _check_notifications(self, data: dict) -> None:
         """Émet une notification si nouveau mail ou changement d'événement.
