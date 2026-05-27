@@ -18,6 +18,7 @@ import base64
 import json
 import os
 import subprocess
+import sys
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -221,8 +222,8 @@ class DashboardMenubar(rumps.App):
         self.mail_from = rumps.MenuItem(
             "   👤 —", callback=_open_in_browser(URL_GMAIL)
         )
-        self.mail_subject = rumps.MenuItem(
-            "   ✏️ —", callback=_open_in_browser(URL_GMAIL)
+        self.mail_summary = rumps.MenuItem(
+            "   💬 —", callback=_open_in_browser(URL_GMAIL)
         )
 
         # ── Actions ────────────────────────────────────
@@ -245,7 +246,7 @@ class DashboardMenubar(rumps.App):
             None,
             self.mail_gmail,
             self.mail_from,
-            self.mail_subject,
+            self.mail_summary,
             None,
             self.last_updated_btn,
             self.mail_clear_btn,
@@ -282,7 +283,7 @@ class DashboardMenubar(rumps.App):
         self._prev_unread_total = self._last_known_unread
         self.mail_gmail.title = "✉️ Gmail : 0 non lu"
         self.mail_from.title = "   👤 —"
-        self.mail_subject.title = "   ✏️ —"
+        self.mail_summary.title = "   💬 —"
         self.title = ""
 
     def force_update(self, _: object) -> None:
@@ -393,6 +394,17 @@ class DashboardMenubar(rumps.App):
                 with open(DATA_FILE, "w", encoding="utf-8") as f:
                     json.dump(dashboard, f, ensure_ascii=False)
 
+                # Summarize via OpenClaw
+                if latest_unread and latest_unread.get("body"):
+                    script: str = os.path.join(_SCRIPT_DIR, "summarize_mail.py")
+                    try:
+                        subprocess.run(
+                            [sys.executable, script],
+                            timeout=40,
+                        )
+                    except Exception:
+                        pass
+
                 self.refresh_data()
                 send_notification(
                     title="✅ Dashboard mis à jour",
@@ -453,16 +465,20 @@ class DashboardMenubar(rumps.App):
         latest: object = data.get("latest_unread")
         if isinstance(latest, dict) and gmail_shown > 0:
             sender: str = _format_mail_sender(str(latest.get("from", "")))
-            subject: str = str(latest.get("subject", "")).strip() or "(sans objet)"
+            summary: str = (
+                str(latest.get("summary", "")).strip()
+                or str(latest.get("subject", "")).strip()
+                or "(sans objet)"
+            )
             if len(sender) > 60:
                 sender = sender[:57] + "…"
-            if len(subject) > 70:
-                subject = subject[:67] + "…"
+            if len(summary) > 70:
+                summary = summary[:67] + "…"
             self.mail_from.title = f"   👤 {sender}"
-            self.mail_subject.title = f"   ✏️ {subject}"
+            self.mail_summary.title = f"   💬 {summary}"
         else:
             self.mail_from.title = "   👤 —"
-            self.mail_subject.title = "   ✏️ —"
+            self.mail_summary.title = "   💬 —"
 
         self.title = str(gmail_shown) if gmail_shown > 0 else ""
         last_upd: str = str(data.get("last_updated", ""))

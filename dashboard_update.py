@@ -146,5 +146,16 @@ def main() -> None:
 
     print(f"OK — {len(next_events)} events, {unread_gmail} unread, {now_local}")
 
+    # ── Summarize latest mail via OpenClaw ──
+    if latest_unread and latest_unread.get("body"):
+        script: str = os.path.join(os.path.dirname(os.path.abspath(__file__)), "summarize_mail.py")
+        try:
+            subprocess.run(
+                [sys.executable, script],
+                timeout=40,
+            )
+        except Exception as e:
+            print(f"Summarize error: {e}", file=sys.stderr)
+
 if __name__ == "__main__":
     main()
