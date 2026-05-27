@@ -12,7 +12,7 @@ Une app macOS qui vit dans la barre de menus et affiche en un coup d'oeil :
 ## Fonctionnement
 
 ```
-dashboard_update.py ──(toutes les 10 min)──> agent_dashboard.json
+dashboard_update.py ──(toutes les 10 min)──> dashboard.json
         │                                             │
         └── summarize_mail.py ── OpenClaw ── résumé ──┘
                                                       │
@@ -21,7 +21,7 @@ menubar.py ──(toutes les 10 sec)── lit le JSON ───────┘
                           barre de menus macOS
 ```
 
-- **`dashboard_update.py`** appelle les APIs Google Calendar et Gmail via [`gws`](https://github.com/nicholasgasior/gws) et écrit le résultat dans un JSON.
+- **`dashboard_update.py`** appelle les APIs Google Calendar et Gmail via [`gws`](https://github.com/nicholasgasior/gws) et écrit le résultat dans `dashboard.json` à la racine du projet.
 - **`summarize_mail.py`** envoie le corps du dernier mail à OpenClaw (`openclaw infer model run`) et écrit un résumé d'une phrase dans le JSON.
 - **`menubar.py`** relit ce JSON toutes les 10 secondes et met à jour la barre de menus via [rumps](https://github.com/jaredks/rumps).
 - Deux **LaunchAgents** macOS automatisent le tout au démarrage.
@@ -87,6 +87,7 @@ dashboard-menubar/
 ├── menubar.py              # App barre de menus (rumps)
 ├── dashboard_update.py     # Script de collecte Calendar + Gmail
 ├── summarize_mail.py       # Résumé du dernier mail via OpenClaw
+├── dashboard.json          # Données Calendar + Gmail (gitignored)
 ├── assets/
 │   ├── bell.svg            # Icône source (SVG)
 │   └── bell.png            # Icône menubar (PNG 44×44, template)

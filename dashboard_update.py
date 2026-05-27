@@ -3,7 +3,7 @@
 Dashboard Update — Script autonome
 
 Appelle les APIs Google Calendar et Gmail via gws CLI,
-puis écrit le résultat dans agent_dashboard.json.
+puis écrit le résultat dans dashboard.json.
 
 Conçu pour être lancé toutes les 10 min par un LaunchAgent.
 """
@@ -16,7 +16,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-DATA_FILE: str = os.path.expanduser("~/.openclaw/workspace/agent_dashboard.json")
+DATA_FILE: str = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dashboard.json")
 MAX_EVENTS: int = 2
 MAX_UNREAD: int = 100
 

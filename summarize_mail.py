@@ -2,7 +2,7 @@
 """
 Summarize Mail — Résume le dernier mail via OpenClaw
 
-Lit le body du dernier mail non lu depuis agent_dashboard.json,
+Lit le body du dernier mail non lu depuis dashboard.json,
 demande un résumé court à OpenClaw (openclaw infer model run),
 et écrit le résultat dans le champ `summary` du JSON.
 
@@ -14,7 +14,7 @@ import os
 import subprocess
 import sys
 
-DATA_FILE: str = os.path.expanduser("~/.openclaw/workspace/agent_dashboard.json")
+DATA_FILE: str = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dashboard.json")
 MODEL: str = "azure/o4-mini"
 MAX_BODY_CHARS: int = 3000
 MAX_SUMMARY_CHARS: int = 100

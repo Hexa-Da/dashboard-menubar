@@ -8,7 +8,7 @@ Affiche dans la barre de menus macOS :
   - les actions : rafraîchir, marquer Gmail comme lu (UI seulement),
     forcer une mise à jour, quitter.
 
-Les données sont lues depuis ~/.openclaw/workspace/agent_dashboard.json
+Les données sont lues depuis dashboard.json à la racine du projet
 (écrit toutes les 10 min par dashboard_update.py via LaunchAgent).
 
 Prérequis : `pip install rumps pyobjc-framework-Cocoa`.
@@ -32,7 +32,7 @@ from AppKit import NSApplication, NSApplicationActivationPolicyAccessory
 # CONFIG
 # ─────────────────────────────────────────
 
-DATA_FILE: str = os.path.expanduser("~/.openclaw/workspace/agent_dashboard.json")
+DATA_FILE: str = os.path.join(_SCRIPT_DIR, "dashboard.json")
 REFRESH_INTERVAL: int = 10  # secondes entre deux relectures du JSON
 
 _SCRIPT_DIR: str = os.path.dirname(os.path.abspath(__file__))
