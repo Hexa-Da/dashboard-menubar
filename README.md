@@ -3,8 +3,7 @@
 Une app macOS qui vit dans la barre de menus et affiche en un coup d'oeil :
 
 - **Google Calendar** : prochain événement (titre, horaire, lieu)
-- **Gmail** : nombre de mails non lus + expéditeur et objet du dernier
-- **Ollama** : notification quand un modèle local se charge / se décharge
+- **Gmail** : nombre de mails non lus + expéditeur, objet et contenu du dernier
 
 ![macOS](https://img.shields.io/badge/macOS-compatible-blue)
 ![Python](https://img.shields.io/badge/Python-3.9+-green)
@@ -20,7 +19,7 @@ menubar.py ──(toutes les 10 sec)── lit le JSON ───────┘
                           barre de menus macOS
 ```
 
-- **`dashboard_update.py`** appelle les APIs Google Calendar et Gmail via [`gws`](https://github.com/nicholasgasior/gws) et écrit le résultat dans un fichier JSON.
+- **`dashboard_update.py`** appelle les APIs Google Calendar et Gmail via [`gws`](https://github.com/nicholasgasior/gws) et écrit le résultat dans un JSON.
 - **`menubar.py`** relit ce JSON toutes les 10 secondes et met à jour la barre de menus via [rumps](https://github.com/jaredks/rumps).
 - Deux **LaunchAgents** macOS automatisent le tout au démarrage.
 
@@ -37,7 +36,7 @@ menubar.py ──(toutes les 10 sec)── lit le JSON ───────┘
 
 ```bash
 # Cloner le repo
-git clone https://github.com/<ton-user>/dashboard-menubar.git ~/Documents/dashboard-menubar
+git clone https://github.com/Hexa-Da/dashboard-menubar.git ~/Documents/dashboard-menubar
 cd ~/Documents/dashboard-menubar
 
 # Créer le virtualenv
@@ -54,17 +53,17 @@ python3 menubar.py
 
 ### LaunchAgents (démarrage automatique)
 
-Copier les deux fichiers plist dans `~/Library/LaunchAgents/` puis les charger :
+L'app est conçue pour tourner via deux **LaunchAgents** macOS (`~/Library/LaunchAgents/`) :
+
+- `com.paulantoine.dashboard-update.plist` — exécute `dashboard_update.py` toutes les 10 minutes
+- `com.paulantoine.agentmenubar.plist` — maintient `menubar.py` en vie (`KeepAlive`)
 
 ```bash
-# Mise à jour du dashboard toutes les 10 minutes
 launchctl load ~/Library/LaunchAgents/com.paulantoine.dashboard-update.plist
-
-# App menubar (KeepAlive)
 launchctl load ~/Library/LaunchAgents/com.paulantoine.agentmenubar.plist
 ```
 
-> Les plists s'attendent à ce que le projet soit dans `~/Documents/dashboard-menubar/`.
+Les logs sont écrits dans `logs/` à la racine du projet.
 
 ## Menu
 
@@ -72,7 +71,7 @@ launchctl load ~/Library/LaunchAgents/com.paulantoine.agentmenubar.plist
 |------|----------------|
 | Prochain événement | Ouvre Google Calendar |
 | Mails non lus | Ouvre Gmail |
-| Rafraîchir la lecture | Relit le JSON immédiatement |
+| Dernière mise à jour | Relit le JSON immédiatement |
 | Marquer les mails comme lus | Masque le compteur (UI uniquement) |
 | Forcer la mise à jour | Appelle les APIs Google et réécrit le JSON |
 | Quitter | Ferme l'app |
@@ -85,7 +84,7 @@ dashboard-menubar/
 ├── dashboard_update.py     # Script de collecte Calendar + Gmail
 ├── assets/
 │   ├── bell.svg            # Icône source (SVG)
-│   └── bell.png            # Icône menubar (PNG 128x128)
+│   └── bell.png            # Icône menubar (PNG 44×44, template)
 ├── .gitignore
 └── README.md
 ```

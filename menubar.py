@@ -36,7 +36,7 @@ REFRESH_INTERVAL: int = 10  # secondes entre deux relectures du JSON
 
 _SCRIPT_DIR: str = os.path.dirname(os.path.abspath(__file__))
 ICON_BELL: str = os.path.join(_SCRIPT_DIR, "assets", "bell.png")
-ICON_MENUBAR_SIZE: tuple[float, float] = (18.0, 18.0)
+ICON_MENUBAR_SIZE: tuple[float, float] = (21.0, 21.0)
 
 URL_GOOGLE_CALENDAR: str = "https://calendar.google.com/calendar/u/0/r"
 URL_GMAIL: str = "https://mail.google.com/mail/u/0/#inbox"
