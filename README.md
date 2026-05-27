@@ -3,7 +3,7 @@
 Une app macOS qui vit dans la barre de menus et affiche en un coup d'oeil :
 
 - **Google Calendar** : prochain événement (titre, horaire, lieu)
-- **Gmail** : nombre de mails non lus + expéditeur, objet et contenu du dernier
+- **Gmail** : nombre de mails non lus + expéditeur et résumé IA du dernier mail (via [OpenClaw](https://github.com/nicholasgasior/openclaw))
 
 ![macOS](https://img.shields.io/badge/macOS-compatible-blue)
 ![Python](https://img.shields.io/badge/Python-3.9+-green)
@@ -13,6 +13,8 @@ Une app macOS qui vit dans la barre de menus et affiche en un coup d'oeil :
 
 ```
 dashboard_update.py ──(toutes les 10 min)──> agent_dashboard.json
+        │                                             │
+        └── summarize_mail.py ── OpenClaw ── résumé ──┘
                                                       │
 menubar.py ──(toutes les 10 sec)── lit le JSON ───────┘
                                        │
@@ -20,6 +22,7 @@ menubar.py ──(toutes les 10 sec)── lit le JSON ───────┘
 ```
 
 - **`dashboard_update.py`** appelle les APIs Google Calendar et Gmail via [`gws`](https://github.com/nicholasgasior/gws) et écrit le résultat dans un JSON.
+- **`summarize_mail.py`** envoie le corps du dernier mail à OpenClaw (`openclaw infer model run`) et écrit un résumé d'une phrase dans le JSON.
 - **`menubar.py`** relit ce JSON toutes les 10 secondes et met à jour la barre de menus via [rumps](https://github.com/jaredks/rumps).
 - Deux **LaunchAgents** macOS automatisent le tout au démarrage.
 
@@ -30,6 +33,7 @@ menubar.py ──(toutes les 10 sec)── lit le JSON ───────┘
 - macOS
 - Python 3.9+
 - [gws](https://github.com/nicholasgasior/gws) configuré avec un compte Google (`gws auth login`)
+- [OpenClaw](https://github.com/nicholasgasior/openclaw) pour le résumé IA des mails
 - [Homebrew](https://brew.sh/) (recommandé)
 
 ### Setup
@@ -71,7 +75,7 @@ Les logs sont écrits dans `logs/` à la racine du projet.
 |------|----------------|
 | Prochain événement | Ouvre Google Calendar |
 | Mails non lus | Ouvre Gmail |
-| Dernière mise à jour | Relit le JSON immédiatement |
+| Dernière mise à jour | Ouvre le fichier JSON |
 | Marquer les mails comme lus | Masque le compteur (UI uniquement) |
 | Forcer la mise à jour | Appelle les APIs Google et réécrit le JSON |
 | Quitter | Ferme l'app |
@@ -82,9 +86,11 @@ Les logs sont écrits dans `logs/` à la racine du projet.
 dashboard-menubar/
 ├── menubar.py              # App barre de menus (rumps)
 ├── dashboard_update.py     # Script de collecte Calendar + Gmail
+├── summarize_mail.py       # Résumé du dernier mail via OpenClaw
 ├── assets/
 │   ├── bell.svg            # Icône source (SVG)
 │   └── bell.png            # Icône menubar (PNG 44×44, template)
+├── logs/                   # Logs LaunchAgents (gitignored)
 ├── .gitignore
 └── README.md
 ```
