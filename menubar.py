@@ -32,10 +32,9 @@ from AppKit import NSApplication, NSApplicationActivationPolicyAccessory
 # CONFIG
 # ─────────────────────────────────────────
 
+_SCRIPT_DIR: str = os.path.dirname(os.path.abspath(__file__))
 DATA_FILE: str = os.path.join(_SCRIPT_DIR, "dashboard.json")
 REFRESH_INTERVAL: int = 10  # secondes entre deux relectures du JSON
-
-_SCRIPT_DIR: str = os.path.dirname(os.path.abspath(__file__))
 ICON_BELL: str = os.path.join(_SCRIPT_DIR, "assets", "bell.png")
 ICON_MENUBAR_SIZE: tuple[float, float] = (21.0, 21.0)
 
