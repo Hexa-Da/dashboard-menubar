@@ -266,7 +266,10 @@ class DashboardMenubar(rumps.App):
 
         def loop() -> None:
             while True:
-                self.refresh_data()
+                try:
+                    self.refresh_data()
+                except Exception:
+                    pass
                 time.sleep(REFRESH_INTERVAL)
 
         threading.Thread(target=loop, daemon=True).start()
