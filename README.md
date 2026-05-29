@@ -60,11 +60,11 @@ python3 menubar.py
 L'app est conçue pour tourner via deux **LaunchAgents** macOS (`~/Library/LaunchAgents/`) :
 
 - `com.paulantoine.dashboard-update.plist` — exécute `dashboard_update.py` toutes les 10 minutes
-- `com.paulantoine.agentmenubar.plist` — maintient `menubar.py` en vie (`KeepAlive`)
+- `com.paulantoine.dashboard-menubar.plist` — maintient `menubar.py` en vie (`KeepAlive`)
 
 ```bash
 launchctl load ~/Library/LaunchAgents/com.paulantoine.dashboard-update.plist
-launchctl load ~/Library/LaunchAgents/com.paulantoine.agentmenubar.plist
+launchctl load ~/Library/LaunchAgents/com.paulantoine.dashboard-menubar.plist
 ```
 
 Les logs sont écrits dans `logs/` à la racine du projet.
