@@ -20,13 +20,12 @@ import os
 import subprocess
 import sys
 import threading
-import time
 from datetime import datetime, timedelta, timezone
 from email.utils import parseaddr
 from typing import Callable, Optional
 
 import rumps
-from AppKit import NSApplication, NSApplicationActivationPolicyAccessory
+from AppKit import NSApplication, NSApplicationActivationPolicyAccessory, NSImageLeft
 
 # ─────────────────────────────────────────
 # CONFIG
@@ -202,6 +201,7 @@ class DashboardMenubar(rumps.App):
         self._gmail_cleared: bool = False
         self._cleared_at_unread: int = 0
         self._last_known_unread: int = 0
+        self._button_configured: bool = False
 
         # ── Événement ──────────────────────────────────
         self.event_title = rumps.MenuItem(
@@ -254,25 +254,36 @@ class DashboardMenubar(rumps.App):
             self.quit_btn,
         ]
 
-        self._start_refresh_thread()
+        self._start_refresh_timer()
 
     # ─────────────────────────────────────────
     # Actions
     # ─────────────────────────────────────────
 
-    def _start_refresh_thread(self) -> None:
-        """Démarre une boucle de fond qui relit le JSON toutes les
-        REFRESH_INTERVAL secondes."""
+    def _start_refresh_timer(self) -> None:
+        """Démarre un timer rumps qui relit le JSON toutes les
+        REFRESH_INTERVAL secondes sur le main run loop (thread-safe UI)."""
+        self._refresh_timer = rumps.Timer(self._on_refresh_tick, REFRESH_INTERVAL)
+        self._refresh_timer.start()
 
-        def loop() -> None:
-            while True:
-                try:
-                    self.refresh_data()
-                except Exception:
-                    pass
-                time.sleep(REFRESH_INTERVAL)
+    def _on_refresh_tick(self, _: object) -> None:
+        """Callback du timer — s'exécute sur le main thread."""
+        if not self._button_configured:
+            self._configure_status_button()
+        try:
+            self.refresh_data()
+        except Exception:
+            pass
 
-        threading.Thread(target=loop, daemon=True).start()
+    def _configure_status_button(self) -> None:
+        """Force imagePosition=NSImageLeft pour que le titre (chiffre)
+        n'élargisse le status item que vers la droite."""
+        try:
+            button = self._nsapp.nsstatusitem.button()
+            button.setImagePosition_(NSImageLeft)
+            self._button_configured = True
+        except Exception:
+            pass
 
     def clear_gmail_local(self, _: object) -> None:
         """Marque les mails comme « lus » côté interface seulement.
