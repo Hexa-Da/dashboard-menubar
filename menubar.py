@@ -397,7 +397,7 @@ class DashboardMenubar(rumps.App):
                     json.dump(dashboard, f, ensure_ascii=False)
 
                 # Summarize via OpenClaw
-                if latest_unread and latest_unread.get("body"):
+                if latest_unread and (latest_unread.get("body") or latest_unread.get("snippet")):
                     script: str = os.path.join(_SCRIPT_DIR, "summarize_mail.py")
                     try:
                         subprocess.run(

@@ -147,7 +147,7 @@ def main() -> None:
     print(f"OK — {len(next_events)} events, {unread_gmail} unread, {now_local}")
 
     # ── Summarize latest mail via OpenClaw ──
-    if latest_unread and latest_unread.get("body"):
+    if latest_unread and (latest_unread.get("body") or latest_unread.get("snippet")):
         script: str = os.path.join(os.path.dirname(os.path.abspath(__file__)), "summarize_mail.py")
         try:
             subprocess.run(
