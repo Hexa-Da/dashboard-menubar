@@ -17,6 +17,7 @@ Prérequis : `pip install rumps pyobjc-framework-Cocoa`.
 import base64
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -35,10 +36,24 @@ _SCRIPT_DIR: str = os.path.dirname(os.path.abspath(__file__))
 DATA_FILE: str = os.path.join(_SCRIPT_DIR, "dashboard.json")
 REFRESH_INTERVAL: int = 10  # secondes entre deux relectures du JSON
 ICON_BELL: str = os.path.join(_SCRIPT_DIR, "assets", "bell.png")
-ICON_MENUBAR_SIZE: tuple[float, float] = (21.0, 21.0)
+ICON_MENUBAR_HEIGHT: float = 21.0  # hauteur cible ; la largeur suit le ratio du PNG
 
 URL_GOOGLE_CALENDAR: str = "https://calendar.google.com/calendar/u/0/r"
 URL_GMAIL: str = "https://mail.google.com/mail/u/0/#inbox"
+
+# Notifications : terminal-notifier permet de regrouper (remplacer) et de
+# supprimer les notifs ; sinon on retombe sur osascript (sans suppression).
+_TERMINAL_NOTIFIER: Optional[str] = (
+    shutil.which("terminal-notifier")
+    or next(
+        (p for p in ("/opt/homebrew/bin/terminal-notifier",
+                     "/usr/local/bin/terminal-notifier") if os.path.exists(p)),
+        None,
+    )
+)
+NOTIF_GROUP_MAIL: str = "com.paulantoine.dashboard.mail"
+NOTIF_GROUP_EVENT: str = "com.paulantoine.dashboard.event"
+NOTIF_GROUP_STATUS: str = "com.paulantoine.dashboard.status"
 
 _WEEKDAYS_FR: tuple[str, ...] = (
     "Lundi", "Mardi", "Mercredi", "Jeudi",
@@ -66,13 +81,37 @@ def _open_in_browser(url: str) -> Callable[[object], None]:
     return _handler
 
 
-def send_notification(title: str, message: str, subtitle: str = "") -> None:
-    """Envoie une notification macOS native via osascript."""
+def send_notification(title: str, message: str, subtitle: str = "", group: str = "") -> None:
+    """Envoie une notification macOS.
+
+    Via terminal-notifier si dispo : `group` regroupe les notifs (une nouvelle
+    remplace la précédente du même groupe → pas d'empilement) et permet de les
+    supprimer ensuite. Sinon retombe sur osascript (sans regroupement).
+    """
+    if _TERMINAL_NOTIFIER:
+        cmd: list[str] = [
+            _TERMINAL_NOTIFIER,
+            "-title", title,
+            "-message", message or " ",  # terminal-notifier exige un message non vide
+        ]
+        if subtitle:
+            cmd += ["-subtitle", subtitle]
+        if group:
+            cmd += ["-group", group]
+        subprocess.run(cmd, capture_output=True)
+        return
     script: str = (
         f'display notification "{message}" '
         f'with title "{title}" subtitle "{subtitle}"'
     )
     subprocess.run(["osascript", "-e", script], capture_output=True)
+
+
+def remove_notification(group: str) -> None:
+    """Supprime du Centre de notifications la notif d'un groupe (no-op sans
+    terminal-notifier)."""
+    if _TERMINAL_NOTIFIER and group:
+        subprocess.run([_TERMINAL_NOTIFIER, "-remove", group], capture_output=True)
 
 
 def _parse_local_datetime(iso_str: str) -> datetime:
@@ -193,7 +232,11 @@ class DashboardMenubar(rumps.App):
             quit_button=None,
         )
         if self._icon_nsimage is not None:
-            self._icon_nsimage.setSize_(ICON_MENUBAR_SIZE)
+            sz = self._icon_nsimage.size()
+            width: float = (
+                ICON_MENUBAR_HEIGHT * sz.width / sz.height if sz.height else ICON_MENUBAR_HEIGHT
+            )
+            self._icon_nsimage.setSize_((width, ICON_MENUBAR_HEIGHT))
 
         # État interne
         self._prev_unread_total: int = 0
@@ -281,6 +324,7 @@ class DashboardMenubar(rumps.App):
         try:
             button = self._nsapp.nsstatusitem.button()
             button.setImagePosition_(NSImageLeft)
+            button.setImageHugsTitle_(True)  # colle le chiffre contre le bell
             self._button_configured = True
         except Exception:
             pass
@@ -298,6 +342,7 @@ class DashboardMenubar(rumps.App):
         self.mail_from.title = "   👤 —"
         self.mail_summary.title = "   💬 —"
         self.title = ""
+        remove_notification(NOTIF_GROUP_MAIL)
 
     def force_update(self, _: object) -> None:
         """Appelle les APIs Google via gws et réécrit le JSON."""
@@ -422,9 +467,10 @@ class DashboardMenubar(rumps.App):
                 send_notification(
                     title="✅ Dashboard mis à jour",
                     message="",
+                    group=NOTIF_GROUP_STATUS,
                 )
             except Exception as exc:
-                send_notification("⚠️ Erreur mise à jour", str(exc)[:150])
+                send_notification("⚠️ Erreur mise à jour", str(exc)[:150], group=NOTIF_GROUP_STATUS)
             finally:
                 self.force_update_btn.title = "Forcer la mise à jour"
 
@@ -518,7 +564,11 @@ class DashboardMenubar(rumps.App):
                 title="📧 Nouveaux emails",
                 message=f"{diff} nouveau{'x' if diff > 1 else ''} email{'s' if diff > 1 else ''}",
                 subtitle=f"Gmail : {gmail} non lu{'s' if gmail > 1 else ''}",
+                group=NOTIF_GROUP_MAIL,
             )
+        elif gmail == 0 and self._prev_unread_total > 0:
+            # Tout est lu : on retire la notif mail du Centre de notifications.
+            remove_notification(NOTIF_GROUP_MAIL)
         self._prev_unread_total = gmail
 
         event: Optional[dict] = _extract_event(data)
@@ -531,6 +581,7 @@ class DashboardMenubar(rumps.App):
                     title="📅 Prochain événement",
                     message=title,
                     subtitle=format_event_time(start, end) if start else "",
+                    group=NOTIF_GROUP_EVENT,
                 )
             self._prev_event_title = title
         else:
