@@ -35,7 +35,6 @@ menubar.py ──(toutes les 10 sec)── lit le JSON ───────┘
 - [gws](https://github.com/nicholasgasior/gws) configuré avec un compte Google (`gws auth login`)
 - [OpenClaw](https://github.com/nicholasgasior/openclaw) pour le résumé IA des mails
 - [Homebrew](https://brew.sh/) (recommandé)
-- `terminal-notifier` (optionnel, `brew install terminal-notifier`) — regroupe les notifications et les efface automatiquement quand tout est lu ; sans lui, fallback sur `osascript`
 
 ### Setup
 
