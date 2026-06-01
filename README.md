@@ -12,7 +12,7 @@ Une app macOS qui vit dans la barre de menus et affiche en un coup d'oeil :
 ## Fonctionnement
 
 ```
-dashboard_update.py ──(toutes les 10 min)──> dashboard.json
+dashboard_update.py ──(toutes les 2 min)───> dashboard.json
         │                                             │
         └── summarize_mail.py ── OpenClaw ── résumé ──┘
                                                       │
@@ -59,7 +59,7 @@ python3 menubar.py
 
 L'app est conçue pour tourner via deux **LaunchAgents** macOS (`~/Library/LaunchAgents/`) :
 
-- `com.paulantoine.dashboard-update.plist` — exécute `dashboard_update.py` toutes les 10 minutes
+- `com.paulantoine.dashboard-update.plist` — exécute `dashboard_update.py` toutes les 2 minutes
 - `com.paulantoine.dashboard-menubar.plist` — maintient `menubar.py` en vie (`KeepAlive`)
 
 ```bash

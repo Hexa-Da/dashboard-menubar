@@ -9,7 +9,7 @@ Affiche dans la barre de menus macOS :
     forcer une mise à jour, quitter.
 
 Les données sont lues depuis dashboard.json à la racine du projet
-(écrit toutes les 10 min par dashboard_update.py via LaunchAgent).
+(écrit toutes les 2 min par dashboard_update.py via LaunchAgent).
 
 Prérequis : `pip install rumps pyobjc-framework-Cocoa`.
 """

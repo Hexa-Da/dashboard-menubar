@@ -5,7 +5,7 @@ Dashboard Update — Script autonome
 Appelle les APIs Google Calendar et Gmail via gws CLI,
 puis écrit le résultat dans dashboard.json.
 
-Conçu pour être lancé toutes les 10 min par un LaunchAgent.
+Conçu pour être lancé toutes les 2 min par un LaunchAgent.
 """
 
 import base64
@@ -51,8 +51,18 @@ def main() -> None:
     now_utc: str = now.strftime("%Y-%m-%dT%H:%M:%SZ")
     time_max: str = (now + timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+    # Données précédentes : on s'y replie si un appel échoue, pour éviter
+    # d'écraser de bonnes données par du vide en cas de timeout réseau.
+    previous: dict = {}
+    if os.path.exists(DATA_FILE):
+        try:
+            with open(DATA_FILE, "r", encoding="utf-8") as f:
+                previous = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            previous = {}
+
     # ── Calendar ──
-    next_events: list = []
+    next_events: Optional[list] = None
     try:
         cal: subprocess.CompletedProcess = subprocess.run(
             ["gws", "calendar", "events", "list",
@@ -67,6 +77,7 @@ def main() -> None:
             capture_output=True, text=True, timeout=30, env=env,
         )
         if cal.returncode == 0:
+            next_events = []
             for ev in json.loads(cal.stdout).get("items", []):
                 next_events.append({
                     "title": ev.get("summary", ""),
@@ -76,8 +87,11 @@ def main() -> None:
                 })
     except Exception as e:
         print(f"Calendar error: {e}", file=sys.stderr)
+    if next_events is None:  # appel échoué → on garde les événements précédents
+        next_events = previous.get("next_events") or []
 
     # ── Gmail : count ──
+    count_ok: bool = False
     unread_gmail: int = 0
     first_msg_id: Optional[str] = None
     try:
@@ -92,6 +106,7 @@ def main() -> None:
             capture_output=True, text=True, timeout=30, env=env,
         )
         if gmail.returncode == 0:
+            count_ok = True
             messages: list = json.loads(gmail.stdout).get("messages", [])
             unread_gmail = len(messages)
             if messages:
@@ -101,7 +116,13 @@ def main() -> None:
 
     # ── Gmail : latest ──
     latest_unread = None
-    if first_msg_id:
+    if not count_ok:
+        # Compte indisponible (timeout/auth) : on préserve l'état précédent
+        # en entier plutôt que d'afficher 0 mail non lu à tort.
+        unread_gmail = int(previous.get("unread_gmail", 0))
+        latest_unread = previous.get("latest_unread")
+    elif first_msg_id:
+        prev_latest: dict = previous.get("latest_unread") or {}
         try:
             msg: subprocess.CompletedProcess = subprocess.run(
                 ["gws", "gmail", "users", "messages", "get",
@@ -126,13 +147,22 @@ def main() -> None:
                 snippet: str = msg_data.get("snippet", "")
                 body: str = _extract_text_body(msg_data.get("payload", {}))
                 latest_unread = {
+                    "id": first_msg_id,
                     "from": from_val,
                     "subject": subject_val,
                     "snippet": snippet,
                     "body": body,
                 }
+                # Même mail qu'avant : on garde le résumé déjà calculé.
+                if prev_latest.get("id") == first_msg_id and prev_latest.get("summary"):
+                    latest_unread["summary"] = prev_latest["summary"]
+            elif prev_latest.get("id") == first_msg_id:
+                # get échoué mais c'est le même mail : on garde l'ancien.
+                latest_unread = prev_latest
         except Exception as e:
             print(f"Gmail get error: {e}", file=sys.stderr)
+            if prev_latest.get("id") == first_msg_id:
+                latest_unread = prev_latest
 
     # ── Write JSON ──
     dashboard: dict = {
@@ -146,8 +176,10 @@ def main() -> None:
 
     print(f"OK — {len(next_events)} events, {unread_gmail} unread, {now_local}")
 
-    # ── Summarize latest mail via OpenClaw ──
-    if latest_unread and (latest_unread.get("body") or latest_unread.get("snippet")):
+    # ── Summarize latest mail via OpenClaw (seulement si pas déjà résumé) ──
+    if (latest_unread
+            and not latest_unread.get("summary")
+            and (latest_unread.get("body") or latest_unread.get("snippet"))):
         script: str = os.path.join(os.path.dirname(os.path.abspath(__file__)), "summarize_mail.py")
         try:
             subprocess.run(
