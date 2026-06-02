@@ -26,6 +26,7 @@ from typing import Callable, Optional
 
 import rumps
 from AppKit import NSApplication, NSApplicationActivationPolicyAccessory, NSImageLeft
+from Foundation import NSProcessInfo, NSActivityUserInitiatedAllowingIdleSystemSleep
 
 # ─────────────────────────────────────────
 # CONFIG
@@ -281,14 +282,25 @@ class DashboardMenubar(rumps.App):
         ]
 
         self._start_refresh_timer()
+        self._prevent_app_nap()
+        rumps.events.on_wake.register(self._on_wake)
 
     # ─────────────────────────────────────────
     # Actions
     # ─────────────────────────────────────────
 
     def _start_refresh_timer(self) -> None:
-        """Démarre un timer rumps qui relit le JSON toutes les
-        REFRESH_INTERVAL secondes sur le main run loop (thread-safe UI)."""
+        """(Re)démarre le timer rumps qui relit le JSON toutes les
+        REFRESH_INTERVAL secondes sur le main run loop (thread-safe UI).
+
+        Idempotent : arrête un timer existant avant d'en recréer un (le
+        NSTimer peut cesser de tirer après une veille → cf. _on_wake)."""
+        existing = getattr(self, "_refresh_timer", None)
+        if existing is not None:
+            try:
+                existing.stop()
+            except Exception:
+                pass
         self._refresh_timer = rumps.Timer(self._on_refresh_tick, REFRESH_INTERVAL)
         self._refresh_timer.start()
 
@@ -300,6 +312,27 @@ class DashboardMenubar(rumps.App):
             self.refresh_data()
         except Exception:
             pass
+
+    def _on_wake(self) -> None:
+        """Réveil du Mac (event rumps `on_wake`).
+
+        Après une veille, le NSTimer peut ne plus tirer → on le relance et
+        on force un refresh immédiat pour ne pas rater de nouveaux mails.
+        Indispensable ici car le Mac fait de fréquents « Maintenance Sleep ».
+        """
+        self._start_refresh_timer()
+        self._on_refresh_tick(None)
+
+    def _prevent_app_nap(self) -> None:
+        """Empêche App Nap de geler les timers de ce process accessoire
+        quand il est inactif (le Mac peut toujours se mettre en veille)."""
+        try:
+            self._activity_token = NSProcessInfo.processInfo().beginActivityWithOptions_reason_(
+                NSActivityUserInitiatedAllowingIdleSystemSleep,
+                "Dashboard menubar refresh timer",
+            )
+        except Exception:
+            self._activity_token = None
 
     def _configure_status_button(self) -> None:
         """Force imagePosition=NSImageLeft pour que le titre (chiffre)
