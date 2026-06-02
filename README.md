@@ -12,19 +12,20 @@ Une app macOS qui vit dans la barre de menus et affiche en un coup d'oeil :
 ## Fonctionnement
 
 ```
-dashboard_update.py ──(toutes les 2 min)───> dashboard.json
-        │                                             │
-        └── summarize_mail.py ── OpenClaw ── résumé ──┘
-                                                      │
-menubar.py ──(toutes les 10 sec)── lit le JSON ───────┘
-                                       │
-                          barre de menus macOS
+menubar.py (toujours actif via LaunchAgent)
+   ├──(toutes les 2 min, en fond)── dashboard_update.py ──> dashboard.json
+   │                                      │                       │
+   │                                      └── summarize_mail.py ── OpenClaw ─┐
+   │                                                                          │
+   └──(toutes les 10 sec)── lit le JSON ───────────────────────────────────┘
+                               │
+                  barre de menus macOS
 ```
 
+- **`menubar.py`** est le chef d'orchestre : un seul process, maintenu en vie par un LaunchAgent (`KeepAlive`). Il déclenche lui-même la collecte toutes les 2 min (en arrière-plan), relit `dashboard.json` toutes les 10 s et met à jour la barre de menus via [rumps](https://github.com/jaredks/rumps).
 - **`dashboard_update.py`** appelle les APIs Google Calendar et Gmail via [`gws`](https://github.com/nicholasgasior/gws) et écrit le résultat dans `dashboard.json` à la racine du projet.
 - **`summarize_mail.py`** envoie le corps du dernier mail à OpenClaw (`openclaw infer model run`) et écrit un résumé d'une phrase dans le JSON.
-- **`menubar.py`** relit ce JSON toutes les 10 secondes et met à jour la barre de menus via [rumps](https://github.com/jaredks/rumps).
-- Deux **LaunchAgents** macOS automatisent le tout au démarrage.
+- Le menubar pilote les mises à jour (plus de LaunchAgent dédié à la collecte) : robuste face aux veilles fréquentes (anti-App-Nap + refresh au réveil).
 
 ## Installation
 
@@ -55,19 +56,19 @@ python3 dashboard_update.py
 python3 menubar.py
 ```
 
-### LaunchAgents (démarrage automatique)
+### LaunchAgent (démarrage automatique)
 
-L'app est conçue pour tourner via deux **LaunchAgents** macOS (`~/Library/LaunchAgents/`) :
+L'app tourne via un **seul LaunchAgent** macOS (`~/Library/LaunchAgents/`) :
 
-- `com.paulantoine.dashboard-update.plist` — exécute `dashboard_update.py` toutes les 2 minutes
-- `com.paulantoine.dashboard-menubar.plist` — maintient `menubar.py` en vie (`KeepAlive`)
+- `com.paulantoine.dashboard-menubar.plist` — maintient `menubar.py` en vie (`KeepAlive`). Le menubar déclenche lui-même `dashboard_update.py` toutes les 2 minutes.
 
 ```bash
-launchctl load ~/Library/LaunchAgents/com.paulantoine.dashboard-update.plist
 launchctl load ~/Library/LaunchAgents/com.paulantoine.dashboard-menubar.plist
 ```
 
-Les logs sont écrits dans `logs/` à la racine du projet.
+> Pas de LaunchAgent séparé pour la collecte : sur un Mac qui se met souvent en veille, les jobs `StartInterval` finissent par être abandonnés par `launchd` (exit 78). Confier la collecte au menubar (toujours vivant, anti-App-Nap, refresh au réveil) est bien plus robuste.
+
+Les logs de collecte sont écrits dans `logs/dashboard-update.log`.
 
 ## Menu
 

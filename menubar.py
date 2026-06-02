@@ -35,6 +35,9 @@ from Foundation import NSProcessInfo, NSActivityUserInitiatedAllowingIdleSystemS
 _SCRIPT_DIR: str = os.path.dirname(os.path.abspath(__file__))
 DATA_FILE: str = os.path.join(_SCRIPT_DIR, "dashboard.json")
 REFRESH_INTERVAL: int = 10  # secondes entre deux relectures du JSON
+UPDATE_INTERVAL: int = 120  # secondes entre deux fetch gws (collecte des données)
+UPDATE_SCRIPT: str = os.path.join(_SCRIPT_DIR, "dashboard_update.py")
+UPDATE_LOG: str = os.path.join(_SCRIPT_DIR, "logs", "dashboard-update.log")
 ICON_BELL: str = os.path.join(_SCRIPT_DIR, "assets", "bell.png")
 ICON_MENUBAR_HEIGHT: float = 21.0  # hauteur cible ; la largeur suit le ratio du PNG
 
@@ -229,6 +232,7 @@ class DashboardMenubar(rumps.App):
         self._cleared_at_unread: int = 0
         self._last_known_unread: int = 0
         self._button_configured: bool = False
+        self._update_lock: threading.Lock = threading.Lock()
 
         # ── Événement ──────────────────────────────────
         self.event_title = rumps.MenuItem(
@@ -282,8 +286,10 @@ class DashboardMenubar(rumps.App):
         ]
 
         self._start_refresh_timer()
+        self._start_update_timer()
         self._prevent_app_nap()
         rumps.events.on_wake.register(self._on_wake)
+        self._run_update_once()  # premier fetch immédiat au démarrage
 
     # ─────────────────────────────────────────
     # Actions
@@ -305,7 +311,7 @@ class DashboardMenubar(rumps.App):
         self._refresh_timer.start()
 
     def _on_refresh_tick(self, _: object) -> None:
-        """Callback du timer — s'exécute sur le main thread."""
+        """Callback du timer d'affichage — s'exécute sur le main thread."""
         if not self._button_configured:
             self._configure_status_button()
         try:
@@ -313,15 +319,60 @@ class DashboardMenubar(rumps.App):
         except Exception:
             pass
 
+    def _start_update_timer(self) -> None:
+        """(Re)démarre le timer qui déclenche la collecte gws toutes les
+        UPDATE_INTERVAL secondes. Le menubar pilote lui-même les updates
+        (plus de LaunchAgent dashboard-update, trop fragile face aux veilles).
+
+        Idempotent (cf. _on_wake)."""
+        existing = getattr(self, "_update_timer", None)
+        if existing is not None:
+            try:
+                existing.stop()
+            except Exception:
+                pass
+        self._update_timer = rumps.Timer(self._on_update_tick, UPDATE_INTERVAL)
+        self._update_timer.start()
+
+    def _on_update_tick(self, _: object) -> None:
+        """Tick du timer d'update (main thread) → lance un fetch en fond."""
+        self._run_update_once()
+
+    def _run_update_once(self) -> None:
+        """Exécute dashboard_update.py en arrière-plan, un seul à la fois.
+
+        Le fetch gws/OpenClaw est lent (jusqu'à ~2 min) : il ne doit JAMAIS
+        tourner sur le thread principal. Le verrou évite les chevauchements
+        (tick périodique + réveil)."""
+        if not self._update_lock.acquire(blocking=False):
+            return  # un fetch est déjà en cours
+
+        def _go() -> None:
+            try:
+                os.makedirs(os.path.dirname(UPDATE_LOG), exist_ok=True)
+                with open(UPDATE_LOG, "a", encoding="utf-8") as logf:
+                    subprocess.run(
+                        [sys.executable, UPDATE_SCRIPT],
+                        stdout=logf, stderr=logf, timeout=150,
+                    )
+            except Exception:
+                pass
+            finally:
+                self._update_lock.release()
+
+        threading.Thread(target=_go, daemon=True).start()
+
     def _on_wake(self) -> None:
         """Réveil du Mac (event rumps `on_wake`).
 
-        Après une veille, le NSTimer peut ne plus tirer → on le relance et
-        on force un refresh immédiat pour ne pas rater de nouveaux mails.
-        Indispensable ici car le Mac fait de fréquents « Maintenance Sleep ».
-        """
+        Après une veille, les NSTimer peuvent ne plus tirer → on les relance,
+        on rafraîchit l'affichage et on déclenche un fetch immédiat pour ne
+        pas rater de nouveaux mails. Indispensable car le Mac fait de
+        fréquents « Maintenance Sleep »."""
         self._start_refresh_timer()
+        self._start_update_timer()
         self._on_refresh_tick(None)
+        self._run_update_once()
 
     def _prevent_app_nap(self) -> None:
         """Empêche App Nap de geler les timers de ce process accessoire
