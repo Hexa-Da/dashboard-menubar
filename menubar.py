@@ -29,6 +29,7 @@ import rumps
 from AppKit import NSApplication, NSApplicationActivationPolicyAccessory, NSImageLeft
 from Foundation import NSProcessInfo, NSActivityUserInitiatedAllowingIdleSystemSleep
 
+from gws_errors import derive_gws_auth_status
 from load_env import load_project_env
 from zimbra_unread import fetch_zimbra_mailbox
 
@@ -478,7 +479,10 @@ class DashboardMenubar(rumps.App):
                 now_utc: str = now.strftime("%Y-%m-%dT%H:%M:%SZ")
                 time_max: str = (now + timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+                prev: dict = load_data()
+
                 # ── Calendar ──
+                cal_ok: bool = False
                 cal_result = subprocess.run(
                     [
                         "gws", "calendar", "events", "list",
@@ -495,6 +499,7 @@ class DashboardMenubar(rumps.App):
                 )
                 next_events: list = []
                 if cal_result.returncode == 0:
+                    cal_ok = True
                     cal_data: dict = json.loads(cal_result.stdout)
                     for ev in cal_data.get("items", []):
                         next_events.append({
@@ -517,14 +522,27 @@ class DashboardMenubar(rumps.App):
                     ],
                     capture_output=True, text=True, timeout=30, env=gws_env,
                 )
+                count_ok: bool = False
                 unread_gmail: int = 0
                 first_msg_id: Optional[str] = None
                 if gmail_result.returncode == 0:
+                    count_ok = True
                     gmail_data: dict = json.loads(gmail_result.stdout)
                     messages: list = gmail_data.get("messages", [])
                     unread_gmail = len(messages)
                     if messages:
                         first_msg_id = messages[0].get("id")
+
+                # Invariant : gmail_status reflète la réussite du list, pas du get détail.
+                gmail_status: str = "ok" if count_ok else "error"
+
+                gws_auth_status: str = derive_gws_auth_status(
+                    cal_ok=cal_ok,
+                    gmail_count_ok=count_ok,
+                    cal_proc=cal_result,
+                    gmail_proc=gmail_result,
+                    previous_status=str(prev.get("gws_auth_status", "ok")),
+                )
 
                 # ── Gmail : latest ──
                 latest_unread = None
@@ -563,14 +581,16 @@ class DashboardMenubar(rumps.App):
                 # ── Zimbra (IMAP) ──
                 z_user: Optional[str] = os.environ.get("ZIMBRA_USER")
                 z_pass: Optional[str] = os.environ.get("ZIMBRA_PASS")
-                prev: dict = load_data()
                 unread_zimbra: int = int(prev.get("unread_zimbra", 0))
                 latest_unread_zimbra = prev.get("latest_unread_zimbra")
+                # disabled = pas de compte configuré ; ok/error = tentative IMAP réelle.
+                zimbra_status: str = "disabled"
                 if z_user and z_pass:
                     prev_z: dict = prev.get("latest_unread_zimbra") or {}
                     try:
                         z_count, z_latest = fetch_zimbra_mailbox(z_user, z_pass)
                         unread_zimbra = z_count
+                        zimbra_status = "ok"
                         if z_latest is None:
                             latest_unread_zimbra = None
                         else:
@@ -584,15 +604,20 @@ class DashboardMenubar(rumps.App):
                             if prev_z.get("id") == z_latest["id"] and prev_z.get("summary"):
                                 z_dict["summary"] = prev_z["summary"]
                             latest_unread_zimbra = z_dict
-                    except Exception:
-                        pass  # fallback : valeurs précédentes
+                    except Exception as exc:
+                        print(f"Zimbra error: {exc}", file=sys.stderr)
+                        zimbra_status = "error"
+                        # fallback : valeurs précédentes déjà en place.
 
                 # ── Write JSON ──
                 dashboard: dict = {
                     "next_events": next_events,
                     "unread_gmail": unread_gmail,
+                    "gmail_status": gmail_status,
+                    "gws_auth_status": gws_auth_status,
                     "latest_unread": latest_unread,
                     "unread_zimbra": unread_zimbra,
+                    "zimbra_status": zimbra_status,
                     "latest_unread_zimbra": latest_unread_zimbra,
                     "last_updated": now_local,
                 }
@@ -640,14 +665,24 @@ class DashboardMenubar(rumps.App):
     def _update_menu(self, data: dict) -> None:
         """Met à jour les libellés des MenuItems depuis `data`."""
         # ── Événement ─────────────────────────────────
+        gws_auth_error: bool = data.get("gws_auth_status") == "auth_error"
         event: Optional[dict] = _extract_event(data)
         if event is None:
-            self.event_title.title = "📅 Aucun événement à venir"
-            self.event_time.title = "   ⏰ —"
+            cal_title: str = "📅 Aucun événement à venir"
+            if gws_auth_error:
+                cal_title += " 🔑"
+            self.event_title.title = cal_title
+            if gws_auth_error:
+                self.event_time.title = "   🔑 Token gws — gws auth login"
+            else:
+                self.event_time.title = "   ⏰ —"
             self.event_location.title = "   📍 —"
         else:
             title: str = str(event.get("title", "Événement sans titre"))
-            self.event_title.title = f"📅 {title}"
+            cal_title = f"📅 {title}"
+            if gws_auth_error:
+                cal_title += " 🔑"
+            self.event_title.title = cal_title
 
             start: str = str(event.get("start", ""))
             end: str = str(event.get("end", ""))
@@ -668,9 +703,15 @@ class DashboardMenubar(rumps.App):
         self._last_known_unread = gmail_raw
         gmail_shown: int = 0 if self._gmail_cleared else gmail_raw
 
-        self.mail_gmail.title = (
+        gmail_title: str = (
             f"✉️ Gmail : {gmail_shown} non lu{'s' if gmail_shown > 1 else ''}"
         )
+        # Auth gws (token révoqué) prioritaire sur l'avertissement réseau générique.
+        if gws_auth_error:
+            gmail_title += " 🔑"
+        elif data.get("gmail_status") == "error":
+            gmail_title += " ⚠️"
+        self.mail_gmail.title = gmail_title
 
         latest: object = data.get("latest_unread")
         if isinstance(latest, dict) and gmail_shown > 0:
@@ -697,9 +738,12 @@ class DashboardMenubar(rumps.App):
         self._last_known_unread_zimbra = zimbra_raw
         zimbra_shown: int = 0 if self._zimbra_cleared else zimbra_raw
 
-        self.mail_zimbra.title = (
+        zimbra_title: str = (
             f"✉️ Zimbra : {zimbra_shown} non lu{'s' if zimbra_shown > 1 else ''}"
         )
+        if data.get("zimbra_status") == "error":
+            zimbra_title += " ⚠️"
+        self.mail_zimbra.title = zimbra_title
 
         latest_z: object = data.get("latest_unread_zimbra")
         if isinstance(latest_z, dict) and zimbra_shown > 0:

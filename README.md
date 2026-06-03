@@ -24,6 +24,7 @@ menubar.py (toujours actif via LaunchAgent)
 - **`menubar.py`** est le chef d'orchestre : un seul process, maintenu en vie par un LaunchAgent (`KeepAlive`). Il déclenche la collecte toutes les 2 min, relit `dashboard.json` toutes les 10 s, affiche Gmail et Zimbra en sections distinctes, et le chiffre sur la cloche = **Gmail + Zimbra**.
 - **`load_env.py`** charge le fichier `.env` au démarrage (stdlib, pas de dépendance `python-dotenv`).
 - **`dashboard_update.py`** appelle les APIs Google Calendar et Gmail via [`gws`](https://github.com/nicholasgasior/gws), interroge Zimbra via IMAP, et écrit le résultat dans `dashboard.json` à la racine du projet.
+- **`gws_errors.py`** détecte les échecs OAuth de gws (token révoqué, `invalid_grant`, credentials absents) à partir de la sortie du CLI.
 - **`zimbra_unread.py`** se connecte à la messagerie Zimbra de l'UL en IMAP (SSL, lecture seule), compte les non-lus et récupère le dernier sans le marquer comme lu.
 - **`summarize_mail.py`** envoie le corps du dernier mail (Gmail et Zimbra) à OpenClaw et écrit un résumé d'une phrase dans le JSON.
 - Le menubar pilote les mises à jour (plus de LaunchAgent dédié à la collecte) : robuste face aux veilles fréquentes (anti-App-Nap + refresh au réveil).
@@ -89,12 +90,22 @@ Les logs de collecte sont écrits dans `logs/dashboard-update.log`.
 | Forcer la mise à jour | Appelle Google + Zimbra et réécrit le JSON |
 | Quitter | Ferme l'app |
 
+### Indicateurs de connexion dans le menu
+
+Les suffixes sont ajoutés aux lignes **Calendar**, **Gmail** et **Zimbra** :
+| Suffixe | Condition | Action suggérée |
+|---------|-----------|-----------------|
+| ⚠️ | `gmail_status` ou `zimbra_status` = `error` | Vérifier réseau, IMAP, ou logs (`dashboard_update.py` / stderr) |
+| 🔑 | `gws_auth_status` = `auth_error` | Reconnecter Google : `gws auth login` (prioritaire sur ⚠️ pour Gmail) |
+
+
 ## Structure
 
 ```
 dashboard-menubar/
 ├── menubar.py              # App barre de menus (rumps)
 ├── dashboard_update.py     # Collecte Calendar + Gmail + Zimbra
+├── gws_errors.py           # Détection erreurs OAuth gws
 ├── zimbra_unread.py        # Accès IMAP à la messagerie Zimbra UL
 ├── load_env.py             # Charge .env au démarrage
 ├── .env.example            # Modèle d'identifiants

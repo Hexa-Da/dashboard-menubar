@@ -20,6 +20,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+from gws_errors import derive_gws_auth_status
 from load_env import load_project_env
 from zimbra_unread import fetch_zimbra_mailbox
 
@@ -72,8 +73,10 @@ def main() -> None:
 
     # ── Calendar ──
     next_events: Optional[list] = None
+    cal_ok: bool = False
+    cal: Optional[subprocess.CompletedProcess[str]] = None
     try:
-        cal: subprocess.CompletedProcess = subprocess.run(
+        cal = subprocess.run(
             ["gws", "calendar", "events", "list",
              "--params", json.dumps({
                  "calendarId": "primary",
@@ -86,6 +89,7 @@ def main() -> None:
             capture_output=True, text=True, timeout=30, env=env,
         )
         if cal.returncode == 0:
+            cal_ok = True
             next_events = []
             for ev in json.loads(cal.stdout).get("items", []):
                 next_events.append({
@@ -103,8 +107,9 @@ def main() -> None:
     count_ok: bool = False
     unread_gmail: int = 0
     first_msg_id: Optional[str] = None
+    gmail: Optional[subprocess.CompletedProcess[str]] = None
     try:
-        gmail: subprocess.CompletedProcess = subprocess.run(
+        gmail = subprocess.run(
             ["gws", "gmail", "users", "messages", "list",
              "--params", json.dumps({
                  "userId": "me",
@@ -122,6 +127,17 @@ def main() -> None:
                 first_msg_id = messages[0].get("id")
     except Exception as e:
         print(f"Gmail list error: {e}", file=sys.stderr)
+
+    # Invariant : gmail_status reflète la réussite du list, pas du get détail.
+    gmail_status: str = "ok" if count_ok else "error"
+
+    gws_auth_status: str = derive_gws_auth_status(
+        cal_ok=cal_ok,
+        gmail_count_ok=count_ok,
+        cal_proc=cal,
+        gmail_proc=gmail,
+        previous_status=str(previous.get("gws_auth_status", "ok")),
+    )
 
     # ── Gmail : latest ──
     latest_unread = None
@@ -180,11 +196,14 @@ def main() -> None:
     z_pass: Optional[str] = os.environ.get("ZIMBRA_PASS")
     unread_zimbra: int = int(previous.get("unread_zimbra", 0))
     latest_unread_zimbra = previous.get("latest_unread_zimbra")
+    # disabled = pas de compte configuré ; ok/error = tentative IMAP réelle.
+    zimbra_status: str = "disabled"
     if z_user and z_pass:
         prev_z: dict = previous.get("latest_unread_zimbra") or {}
         try:
             z_count, z_latest = fetch_zimbra_mailbox(z_user, z_pass)
             unread_zimbra = z_count
+            zimbra_status = "ok"
             if z_latest is None:
                 latest_unread_zimbra = None
             else:
@@ -201,14 +220,18 @@ def main() -> None:
                 latest_unread_zimbra = z_dict
         except Exception as e:
             print(f"Zimbra error: {e}", file=sys.stderr)
+            zimbra_status = "error"
             # fallback : valeurs précédentes déjà en place.
 
     # ── Write JSON ──
     dashboard: dict = {
         "next_events": next_events,
         "unread_gmail": unread_gmail,
+        "gmail_status": gmail_status,
+        "gws_auth_status": gws_auth_status,
         "latest_unread": latest_unread,
         "unread_zimbra": unread_zimbra,
+        "zimbra_status": zimbra_status,
         "latest_unread_zimbra": latest_unread_zimbra,
         "last_updated": now_local,
     }
