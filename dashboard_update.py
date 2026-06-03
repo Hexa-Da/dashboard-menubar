@@ -54,6 +54,15 @@ def _extract_text_body(payload: dict) -> str:
     return ""
 
 
+def _write_json_atomic(path: str, data: dict) -> None:
+    """Écrit le JSON de façon atomique (tmp + os.replace) : un lecteur
+    concurrent (le menubar, toutes les 10 s) ne voit jamais un fichier tronqué."""
+    tmp: str = f"{path}.{os.getpid()}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
+    os.replace(tmp, path)
+
+
 def main() -> None:
     env: dict = _gws_env()
     now: datetime = datetime.now(timezone.utc)
@@ -235,8 +244,7 @@ def main() -> None:
         "latest_unread_zimbra": latest_unread_zimbra,
         "last_updated": now_local,
     }
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(dashboard, f, ensure_ascii=False)
+    _write_json_atomic(DATA_FILE, dashboard)
 
     print(f"OK — {len(next_events)} events, {unread_gmail} gmail, "
           f"{unread_zimbra} zimbra, {now_local}")

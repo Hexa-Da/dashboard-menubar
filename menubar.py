@@ -15,13 +15,12 @@ Les données sont lues depuis dashboard.json à la racine du projet
 Prérequis : `pip install rumps pyobjc-framework-Cocoa`.
 """
 
-import base64
 import json
 import os
 import subprocess
 import sys
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from email.utils import parseaddr
 from typing import Callable, Optional
 
@@ -29,9 +28,7 @@ import rumps
 from AppKit import NSApplication, NSApplicationActivationPolicyAccessory, NSImageLeft
 from Foundation import NSProcessInfo, NSActivityUserInitiatedAllowingIdleSystemSleep
 
-from gws_errors import derive_gws_auth_status
 from load_env import load_project_env
-from zimbra_unread import fetch_zimbra_mailbox
 
 load_project_env()
 
@@ -134,23 +131,6 @@ def format_event_time(start_str: str, end_str: str) -> str:
         return f"{day_label} • {times}"
     except (ValueError, TypeError):
         return start_str
-
-
-def _extract_text_body(payload: dict) -> str:
-    mime = payload.get("mimeType", "")
-    if mime == "text/plain":
-        data = payload.get("body", {}).get("data", "")
-        if data:
-            return base64.urlsafe_b64decode(data).decode("utf-8", errors="replace")
-    for part in payload.get("parts", []):
-        if part.get("mimeType") == "text/plain":
-            data = part.get("body", {}).get("data", "")
-            if data:
-                return base64.urlsafe_b64decode(data).decode("utf-8", errors="replace")
-        nested = _extract_text_body(part)
-        if nested:
-            return nested
-    return ""
 
 
 def _format_mail_sender(from_header: str) -> str:
@@ -460,191 +440,32 @@ class DashboardMenubar(rumps.App):
         self._refresh_badge()
 
     def force_update(self, _: object) -> None:
-        """Appelle les APIs Google via gws et réécrit le JSON."""
+        """Force une collecte immédiate.
+
+        Délègue au même script que la collecte périodique (dashboard_update.py)
+        pour une logique unique et robuste, sous le verrou partagé (pas de
+        collecte concurrente). L'affichage se rafraîchit via le timer ; on
+        notifie à la fin.
+        """
 
         def _run() -> None:
             self.force_update_btn.title = "Mise à jour en cours..."
-            gws_env: dict = os.environ.copy()
-            gws_env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + gws_env.get("PATH", "")
-            gws_env["GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND"] = "file"
-            gws_env["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"] = os.path.expanduser("~/.config/gws")
-
+            ok: bool = True
             try:
-                now: datetime = datetime.now(timezone.utc)
-                now_local: str = now.astimezone().isoformat(timespec="seconds")
-                now_utc: str = now.strftime("%Y-%m-%dT%H:%M:%SZ")
-                time_max: str = (now + timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-                prev: dict = load_data()
-
-                # ── Calendar ──
-                cal_ok: bool = False
-                cal_result = subprocess.run(
-                    [
-                        "gws", "calendar", "events", "list",
-                        "--params", json.dumps({
-                            "calendarId": "primary",
-                            "timeMin": now_utc,
-                            "timeMax": time_max,
-                            "singleEvents": True,
-                            "orderBy": "startTime",
-                            "maxResults": 2,
-                        }),
-                    ],
-                    capture_output=True, text=True, timeout=30, env=gws_env,
-                )
-                next_events: list = []
-                if cal_result.returncode == 0:
-                    cal_ok = True
-                    cal_data: dict = json.loads(cal_result.stdout)
-                    for ev in cal_data.get("items", []):
-                        next_events.append({
-                            "title": ev.get("summary", ""),
-                            "start": (ev.get("start") or {}).get("dateTime", ""),
-                            "end": (ev.get("end") or {}).get("dateTime", ""),
-                            "location": ev.get("location", ""),
-                        })
-
-                # ── Gmail : count ──
-                gmail_result = subprocess.run(
-                    [
-                        "gws", "gmail", "users", "messages", "list",
-                        "--params", json.dumps({
-                            "userId": "me",
-                            "labelIds": ["INBOX"],
-                            "q": "is:unread",
-                            "maxResults": 100,
-                        }),
-                    ],
-                    capture_output=True, text=True, timeout=30, env=gws_env,
-                )
-                count_ok: bool = False
-                unread_gmail: int = 0
-                first_msg_id: Optional[str] = None
-                if gmail_result.returncode == 0:
-                    count_ok = True
-                    gmail_data: dict = json.loads(gmail_result.stdout)
-                    messages: list = gmail_data.get("messages", [])
-                    unread_gmail = len(messages)
-                    if messages:
-                        first_msg_id = messages[0].get("id")
-
-                # Invariant : gmail_status reflète la réussite du list, pas du get détail.
-                gmail_status: str = "ok" if count_ok else "error"
-
-                gws_auth_status: str = derive_gws_auth_status(
-                    cal_ok=cal_ok,
-                    gmail_count_ok=count_ok,
-                    cal_proc=cal_result,
-                    gmail_proc=gmail_result,
-                    previous_status=str(prev.get("gws_auth_status", "ok")),
-                )
-
-                # ── Gmail : latest ──
-                latest_unread = None
-                if first_msg_id:
-                    msg_result = subprocess.run(
-                        [
-                            "gws", "gmail", "users", "messages", "get",
-                            "--params", json.dumps({
-                                "userId": "me",
-                                "id": first_msg_id,
-                                "format": "full",
-                            }),
-                        ],
-                        capture_output=True, text=True, timeout=30, env=gws_env,
-                    )
-                    if msg_result.returncode == 0:
-                        msg_data: dict = json.loads(msg_result.stdout)
-                        headers: list = msg_data.get("payload", {}).get("headers", [])
-                        from_val: str = ""
-                        subject_val: str = ""
-                        for h in headers:
-                            name: str = h.get("name", "").lower()
-                            if name == "from":
-                                from_val = h.get("value", "")
-                            elif name == "subject":
-                                subject_val = h.get("value", "")[:80]
-                        snippet: str = msg_data.get("snippet", "")
-                        body: str = _extract_text_body(msg_data.get("payload", {}))
-                        latest_unread = {
-                            "from": from_val,
-                            "subject": subject_val,
-                            "snippet": snippet,
-                            "body": body,
-                        }
-
-                # ── Zimbra (IMAP) ──
-                z_user: Optional[str] = os.environ.get("ZIMBRA_USER")
-                z_pass: Optional[str] = os.environ.get("ZIMBRA_PASS")
-                unread_zimbra: int = int(prev.get("unread_zimbra", 0))
-                latest_unread_zimbra = prev.get("latest_unread_zimbra")
-                # disabled = pas de compte configuré ; ok/error = tentative IMAP réelle.
-                zimbra_status: str = "disabled"
-                if z_user and z_pass:
-                    prev_z: dict = prev.get("latest_unread_zimbra") or {}
-                    try:
-                        z_count, z_latest = fetch_zimbra_mailbox(z_user, z_pass)
-                        unread_zimbra = z_count
-                        zimbra_status = "ok"
-                        if z_latest is None:
-                            latest_unread_zimbra = None
-                        else:
-                            z_dict: dict = {
-                                "id": z_latest["id"],
-                                "from": z_latest["from_"],
-                                "subject": z_latest["subject"],
-                                "snippet": z_latest["snippet"],
-                                "body": z_latest["body"],
-                            }
-                            if prev_z.get("id") == z_latest["id"] and prev_z.get("summary"):
-                                z_dict["summary"] = prev_z["summary"]
-                            latest_unread_zimbra = z_dict
-                    except Exception as exc:
-                        print(f"Zimbra error: {exc}", file=sys.stderr)
-                        zimbra_status = "error"
-                        # fallback : valeurs précédentes déjà en place.
-
-                # ── Write JSON ──
-                dashboard: dict = {
-                    "next_events": next_events,
-                    "unread_gmail": unread_gmail,
-                    "gmail_status": gmail_status,
-                    "gws_auth_status": gws_auth_status,
-                    "latest_unread": latest_unread,
-                    "unread_zimbra": unread_zimbra,
-                    "zimbra_status": zimbra_status,
-                    "latest_unread_zimbra": latest_unread_zimbra,
-                    "last_updated": now_local,
-                }
-                with open(DATA_FILE, "w", encoding="utf-8") as f:
-                    json.dump(dashboard, f, ensure_ascii=False)
-
-                # Summarize via OpenClaw (Gmail + Zimbra)
-                def _needs(m) -> bool:
-                    return (isinstance(m, dict)
-                            and not m.get("summary")
-                            and bool(m.get("body") or m.get("snippet")))
-
-                if _needs(latest_unread) or _needs(latest_unread_zimbra):
-                    script: str = os.path.join(_SCRIPT_DIR, "summarize_mail.py")
-                    try:
+                with self._update_lock:  # attend une collecte périodique en cours
+                    os.makedirs(os.path.dirname(UPDATE_LOG), exist_ok=True)
+                    with open(UPDATE_LOG, "a", encoding="utf-8") as logf:
                         subprocess.run(
-                            [sys.executable, script],
-                            timeout=60,
+                            [sys.executable, UPDATE_SCRIPT],
+                            stdout=logf, stderr=logf, timeout=150,
                         )
-                    except Exception:
-                        pass
-
-                self.refresh_data()
-                send_notification(
-                    title="✅ Dashboard mis à jour",
-                    message="",
-                )
             except Exception as exc:
+                ok = False
                 send_notification("⚠️ Erreur mise à jour", str(exc)[:150])
             finally:
                 self.force_update_btn.title = "Forcer la mise à jour"
+            if ok:
+                send_notification(title="✅ Dashboard mis à jour", message="")
 
         threading.Thread(target=_run, daemon=True).start()
 

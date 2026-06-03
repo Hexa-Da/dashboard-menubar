@@ -23,6 +23,15 @@ MAX_BODY_CHARS: int = 3000
 MAX_SUMMARY_CHARS: int = 100
 
 
+def _write_json_atomic(path: str, data: dict) -> None:
+    """Écrit le JSON de façon atomique (tmp + os.replace) : un lecteur
+    concurrent (le menubar, toutes les 10 s) ne voit jamais un fichier tronqué."""
+    tmp: str = f"{path}.{os.getpid()}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
+    os.replace(tmp, path)
+
+
 def _summarize_one(latest: dict) -> bool:
     """Résume un mail (dict avec from/subject/body/snippet) et écrit `summary`.
 
@@ -109,8 +118,7 @@ def main() -> None:
                 changed = True
 
     if changed:
-        with open(DATA_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False)
+        _write_json_atomic(DATA_FILE, data)
     else:
         print("Nothing to summarize")
 

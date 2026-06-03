@@ -30,6 +30,7 @@ from typing import Optional, TypedDict
 
 DEFAULT_HOST: str = "mail.etu.univ-lorraine.fr"
 DEFAULT_PORT: int = 993
+DEFAULT_TIMEOUT: int = 20  # secondes : évite un blocage IMAP indéfini
 MAX_BODY_CHARS: int = 3000  # aligné sur Gmail (summarize_mail.py)
 MAX_SNIPPET_CHARS: int = 200
 MAX_SUBJECT_CHARS: int = 80
@@ -38,7 +39,7 @@ MAX_SUBJECT_CHARS: int = 80
 class ZimbraLatestMail(TypedDict):
     """Détail du dernier mail non lu.
 
-    `id` est le numéro de séquence IMAP (string) : sert à détecter
+    `id` est l'UID IMAP (string, stable) : sert à détecter
     « même mail qu'avant » et réutiliser un résumé déjà calculé.
     """
     id: str
@@ -95,37 +96,41 @@ def fetch_zimbra_mailbox(
     host: str = DEFAULT_HOST,
     port: int = DEFAULT_PORT,
     mailbox: str = "INBOX",
+    timeout: int = DEFAULT_TIMEOUT,
 ) -> tuple[int, Optional[ZimbraLatestMail]]:
     """Retourne (nb_non_lus, dernier_non_lu | None).
 
     Préconditions : user et password non vides.
     Invariants :
       - la boîte est ouverte en readonly (BODY.PEEK) → ne marque rien lu ;
+      - on identifie les mails par UID (stable), pas par numéro de séquence ;
       - la connexion IMAP est toujours fermée en finally.
     """
     if not user or not password:
         raise ValueError("user et password requis")
 
-    conn: imaplib.IMAP4_SSL = imaplib.IMAP4_SSL(host, port)
+    conn: imaplib.IMAP4_SSL = imaplib.IMAP4_SSL(host, port, timeout=timeout)
     try:
         conn.login(user, password)
         conn.select(mailbox, readonly=True)
 
-        status, data = conn.search(None, "UNSEEN")
+        # UID SEARCH : les UID sont stables, contrairement aux numéros de
+        # séquence qui se décalent quand un mail arrive ou est expurgé.
+        status, data = conn.uid("search", None, "UNSEEN")
         if status != "OK":
-            raise RuntimeError(f"SEARCH UNSEEN a échoué : {status}")
+            raise RuntimeError(f"UID SEARCH UNSEEN a échoué : {status}")
 
-        ids: list[bytes] = data[0].split()
-        count: int = len(ids)
+        uids: list[bytes] = data[0].split()
+        count: int = len(uids)
         if count == 0:
             return 0, None
 
-        # Le plus récent = dernier id de la liste.
-        last_id: bytes = ids[-1]
-        last_id_str: str = last_id.decode("ascii", errors="replace")
+        # UID croissants → le plus élevé = le plus récent.
+        last_uid: bytes = uids[-1]
+        last_uid_str: str = last_uid.decode("ascii", errors="replace")
 
         # BODY.PEEK[] récupère tout sans marquer comme lu, on parse ensuite.
-        status, msg_data = conn.fetch(last_id, "(BODY.PEEK[])")
+        status, msg_data = conn.uid("fetch", last_uid, "(BODY.PEEK[])")
         if status != "OK" or not msg_data or not isinstance(msg_data[0], tuple):
             # On a le compte mais pas le détail : renvoyer au moins le count.
             return count, None
@@ -141,7 +146,7 @@ def fetch_zimbra_mailbox(
         snippet: str = " ".join(body.split())[:MAX_SNIPPET_CHARS]
 
         latest: ZimbraLatestMail = {
-            "id": last_id_str,
+            "id": last_uid_str,
             "from_": from_val,
             "subject": subject_val,
             "snippet": snippet,
