@@ -4,6 +4,7 @@ Une app macOS qui vit dans la barre de menus et affiche en un coup d'oeil :
 
 - **Google Calendar** : prochain événement (titre, horaire, lieu)
 - **Gmail** : nombre de mails non lus + expéditeur et résumé IA du dernier mail (via [OpenClaw](https://github.com/nicholasgasior/openclaw))
+- **Zimbra (UL)** : nombre de mails non lus + expéditeur et résumé IA du dernier mail (via IMAP)
 
 ![macOS](https://img.shields.io/badge/macOS-compatible-blue)
 ![Python](https://img.shields.io/badge/Python-3.9+-green)
@@ -13,18 +14,18 @@ Une app macOS qui vit dans la barre de menus et affiche en un coup d'oeil :
 
 ```
 menubar.py (toujours actif via LaunchAgent)
-   ├──(toutes les 2 min, en fond)── dashboard_update.py ──> dashboard.json
-   │                                      │                       │
-   │                                      └── summarize_mail.py ── OpenClaw ─┐
-   │                                                                          │
-   └──(toutes les 10 sec)── lit le JSON ───────────────────────────────────┘
-                               │
-                  barre de menus macOS
+   ├──(toutes les 2 min)── dashboard_update.py ──> dashboard.json
+   │                            ├── gws ── Calendar + Gmail
+   │                            ├── zimbra_unread (IMAP, .env) ── Zimbra UL
+   │                            └── summarize_mail.py ── OpenClaw (Gmail + Zimbra)
+   └──(toutes les 10 s)── lit dashboard.json ──> barre de menus + badge (Gmail+Zimbra)
 ```
 
-- **`menubar.py`** est le chef d'orchestre : un seul process, maintenu en vie par un LaunchAgent (`KeepAlive`). Il déclenche lui-même la collecte toutes les 2 min (en arrière-plan), relit `dashboard.json` toutes les 10 s et met à jour la barre de menus via [rumps](https://github.com/jaredks/rumps).
-- **`dashboard_update.py`** appelle les APIs Google Calendar et Gmail via [`gws`](https://github.com/nicholasgasior/gws) et écrit le résultat dans `dashboard.json` à la racine du projet.
-- **`summarize_mail.py`** envoie le corps du dernier mail à OpenClaw (`openclaw infer model run`) et écrit un résumé d'une phrase dans le JSON.
+- **`menubar.py`** est le chef d'orchestre : un seul process, maintenu en vie par un LaunchAgent (`KeepAlive`). Il déclenche la collecte toutes les 2 min, relit `dashboard.json` toutes les 10 s, affiche Gmail et Zimbra en sections distinctes, et le chiffre sur la cloche = **Gmail + Zimbra**.
+- **`load_env.py`** charge le fichier `.env` au démarrage (stdlib, pas de dépendance `python-dotenv`).
+- **`dashboard_update.py`** appelle les APIs Google Calendar et Gmail via [`gws`](https://github.com/nicholasgasior/gws), interroge Zimbra via IMAP, et écrit le résultat dans `dashboard.json` à la racine du projet.
+- **`zimbra_unread.py`** se connecte à la messagerie Zimbra de l'UL en IMAP (SSL, lecture seule), compte les non-lus et récupère le dernier sans le marquer comme lu.
+- **`summarize_mail.py`** envoie le corps du dernier mail (Gmail et Zimbra) à OpenClaw et écrit un résumé d'une phrase dans le JSON.
 - Le menubar pilote les mises à jour (plus de LaunchAgent dédié à la collecte) : robuste face aux veilles fréquentes (anti-App-Nap + refresh au réveil).
 
 ## Installation
@@ -36,6 +37,13 @@ menubar.py (toujours actif via LaunchAgent)
 - [gws](https://github.com/nicholasgasior/gws) configuré avec un compte Google (`gws auth login`)
 - [OpenClaw](https://github.com/nicholasgasior/openclaw) pour le résumé IA des mails
 - [Homebrew](https://brew.sh/) (recommandé)
+
+#### Zimbra (Université de Lorraine)
+
+L'accès se fait en **IMAP**, pas par la connexion web (qui passe par le SSO **CAS**). Le mot de passe ENT sert ici uniquement pour IMAP.
+
+- IMAP doit être activé sur le compte.
+- Identifiants via un fichier **`.env`** à la racine.
 
 ### Setup
 
@@ -66,8 +74,6 @@ L'app tourne via un **seul LaunchAgent** macOS (`~/Library/LaunchAgents/`) :
 launchctl load ~/Library/LaunchAgents/com.paulantoine.dashboard-menubar.plist
 ```
 
-> Pas de LaunchAgent séparé pour la collecte : sur un Mac qui se met souvent en veille, les jobs `StartInterval` finissent par être abandonnés par `launchd` (exit 78). Confier la collecte au menubar (toujours vivant, anti-App-Nap, refresh au réveil) est bien plus robuste.
-
 Les logs de collecte sont écrits dans `logs/dashboard-update.log`.
 
 ## Menu
@@ -75,10 +81,12 @@ Les logs de collecte sont écrits dans `logs/dashboard-update.log`.
 | Item | Action au clic |
 |------|----------------|
 | Prochain événement | Ouvre Google Calendar |
-| Mails non lus | Ouvre Gmail |
+| Gmail : X non lus | Ouvre Gmail |
+| Zimbra : X non lus | Ouvre le webmail UL |
 | Dernière mise à jour | Ouvre le fichier JSON |
-| Marquer les mails comme lus | Masque le compteur (UI uniquement) |
-| Forcer la mise à jour | Appelle les APIs Google et réécrit le JSON |
+| Marquer Gmail comme lu | Masque le compteur Gmail (UI uniquement) |
+| Marquer Zimbra comme lu | Masque le compteur Zimbra (UI uniquement) |
+| Forcer la mise à jour | Appelle Google + Zimbra et réécrit le JSON |
 | Quitter | Ferme l'app |
 
 ## Structure
@@ -86,9 +94,12 @@ Les logs de collecte sont écrits dans `logs/dashboard-update.log`.
 ```
 dashboard-menubar/
 ├── menubar.py              # App barre de menus (rumps)
-├── dashboard_update.py     # Script de collecte Calendar + Gmail
-├── summarize_mail.py       # Résumé du dernier mail via OpenClaw
-├── dashboard.json          # Données Calendar + Gmail (gitignored)
+├── dashboard_update.py     # Collecte Calendar + Gmail + Zimbra
+├── zimbra_unread.py        # Accès IMAP à la messagerie Zimbra UL
+├── load_env.py             # Charge .env au démarrage
+├── .env.example            # Modèle d'identifiants
+├── summarize_mail.py       # Résumé du dernier mail (Gmail + Zimbra) via OpenClaw
+├── dashboard.json          # Données collectées (gitignored)
 ├── assets/
 │   ├── bell.svg            # Icône source (SVG)
 │   └── bell.png            # Icône menubar (PNG 44×44, template)
@@ -96,7 +107,3 @@ dashboard-menubar/
 ├── .gitignore
 └── README.md
 ```
-
-## Licence
-
-MIT

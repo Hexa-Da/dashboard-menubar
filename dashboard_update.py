@@ -2,10 +2,14 @@
 """
 Dashboard Update — Script autonome
 
-Appelle les APIs Google Calendar et Gmail via gws CLI,
-puis écrit le résultat dans dashboard.json.
+Collecte :
+  - Google Calendar et Gmail via gws CLI ;
+  - Zimbra (messagerie UL) via IMAP (zimbra_unread.fetch_zimbra_mailbox).
 
-Conçu pour être lancé toutes les 2 min par un LaunchAgent.
+Écrit le résultat dans dashboard.json, puis lance summarize_mail.py si un
+dernier mail (Gmail ou Zimbra) n'a pas encore de résumé OpenClaw.
+
+Lancé toutes les 2 min par menubar.py (ou manuellement pour test).
 """
 
 import base64
@@ -15,6 +19,11 @@ import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+
+from load_env import load_project_env
+from zimbra_unread import fetch_zimbra_mailbox
+
+load_project_env()
 
 DATA_FILE: str = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dashboard.json")
 MAX_EVENTS: int = 2
@@ -164,27 +173,65 @@ def main() -> None:
             if prev_latest.get("id") == first_msg_id:
                 latest_unread = prev_latest
 
+    # ── Zimbra (IMAP) ──
+    # Même philosophie que Gmail : en cas d'échec (login, réseau, IMAP off),
+    # on préserve l'état précédent plutôt que d'afficher 0 à tort.
+    z_user: Optional[str] = os.environ.get("ZIMBRA_USER")
+    z_pass: Optional[str] = os.environ.get("ZIMBRA_PASS")
+    unread_zimbra: int = int(previous.get("unread_zimbra", 0))
+    latest_unread_zimbra = previous.get("latest_unread_zimbra")
+    if z_user and z_pass:
+        prev_z: dict = previous.get("latest_unread_zimbra") or {}
+        try:
+            z_count, z_latest = fetch_zimbra_mailbox(z_user, z_pass)
+            unread_zimbra = z_count
+            if z_latest is None:
+                latest_unread_zimbra = None
+            else:
+                z_dict: dict = {
+                    "id": z_latest["id"],
+                    "from": z_latest["from_"],
+                    "subject": z_latest["subject"],
+                    "snippet": z_latest["snippet"],
+                    "body": z_latest["body"],
+                }
+                # Même mail qu'avant : on garde le résumé déjà calculé.
+                if prev_z.get("id") == z_latest["id"] and prev_z.get("summary"):
+                    z_dict["summary"] = prev_z["summary"]
+                latest_unread_zimbra = z_dict
+        except Exception as e:
+            print(f"Zimbra error: {e}", file=sys.stderr)
+            # fallback : valeurs précédentes déjà en place.
+
     # ── Write JSON ──
     dashboard: dict = {
         "next_events": next_events,
         "unread_gmail": unread_gmail,
         "latest_unread": latest_unread,
+        "unread_zimbra": unread_zimbra,
+        "latest_unread_zimbra": latest_unread_zimbra,
         "last_updated": now_local,
     }
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(dashboard, f, ensure_ascii=False)
 
-    print(f"OK — {len(next_events)} events, {unread_gmail} unread, {now_local}")
+    print(f"OK — {len(next_events)} events, {unread_gmail} gmail, "
+          f"{unread_zimbra} zimbra, {now_local}")
 
-    # ── Summarize latest mail via OpenClaw (seulement si pas déjà résumé) ──
-    if (latest_unread
-            and not latest_unread.get("summary")
-            and (latest_unread.get("body") or latest_unread.get("snippet"))):
+    # ── Summarize latest mail via OpenClaw (Gmail + Zimbra) ──
+    # On lance summarize_mail.py si l'un des deux derniers mails a un corps
+    # mais pas encore de résumé. Le script boucle sur les deux côtés.
+    def _needs_summary(m) -> bool:
+        return (isinstance(m, dict)
+                and not m.get("summary")
+                and bool(m.get("body") or m.get("snippet")))
+
+    if _needs_summary(latest_unread) or _needs_summary(latest_unread_zimbra):
         script: str = os.path.join(os.path.dirname(os.path.abspath(__file__)), "summarize_mail.py")
         try:
             subprocess.run(
                 [sys.executable, script],
-                timeout=40,
+                timeout=60,
             )
         except Exception as e:
             print(f"Summarize error: {e}", file=sys.stderr)

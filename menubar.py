@@ -4,12 +4,13 @@ Dashboard Menubar
 
 Affiche dans la barre de menus macOS :
   - le prochain événement Google Calendar ;
-  - le nombre de mails Gmail non lus + détails du dernier ;
-  - les actions : rafraîchir, marquer Gmail comme lu (UI seulement),
+  - Gmail : nombre de non lus + expéditeur / résumé du dernier ;
+  - Zimbra (UL, IMAP) : idem, section séparée ;
+  - badge sur la cloche : total Gmail + Zimbra (affichage UI) ;
+  - actions : marquer Gmail/Zimbra comme lus (UI seulement),
     forcer une mise à jour, quitter.
 
 Les données sont lues depuis dashboard.json à la racine du projet
-(écrit toutes les 2 min par dashboard_update.py via LaunchAgent).
 
 Prérequis : `pip install rumps pyobjc-framework-Cocoa`.
 """
@@ -28,6 +29,11 @@ import rumps
 from AppKit import NSApplication, NSApplicationActivationPolicyAccessory, NSImageLeft
 from Foundation import NSProcessInfo, NSActivityUserInitiatedAllowingIdleSystemSleep
 
+from load_env import load_project_env
+from zimbra_unread import fetch_zimbra_mailbox
+
+load_project_env()
+
 # ─────────────────────────────────────────
 # CONFIG
 # ─────────────────────────────────────────
@@ -43,6 +49,7 @@ ICON_MENUBAR_HEIGHT: float = 21.0  # hauteur cible ; la largeur suit le ratio du
 
 URL_GOOGLE_CALENDAR: str = "https://calendar.google.com/calendar/u/0/r"
 URL_GMAIL: str = "https://mail.google.com/mail/u/0/#inbox"
+URL_ZIMBRA: str = "https://mail.etu.univ-lorraine.fr/"
 
 _WEEKDAYS_FR: tuple[str, ...] = (
     "Lundi", "Mardi", "Mercredi", "Jeudi",
@@ -231,6 +238,11 @@ class DashboardMenubar(rumps.App):
         self._gmail_cleared: bool = False
         self._cleared_at_unread: int = 0
         self._last_known_unread: int = 0
+        # Zimbra : mêmes mécaniques que Gmail.
+        self._prev_unread_zimbra: int = 0
+        self._zimbra_cleared: bool = False
+        self._cleared_at_unread_zimbra: int = 0
+        self._last_known_unread_zimbra: int = 0
         self._button_configured: bool = False
         self._update_lock: threading.Lock = threading.Lock()
 
@@ -256,13 +268,27 @@ class DashboardMenubar(rumps.App):
             "   💬 —", callback=_open_in_browser(URL_GMAIL)
         )
 
+        # ── Zimbra ─────────────────────────────────────
+        self.mail_zimbra = rumps.MenuItem(
+            "✉️ Zimbra : —", callback=_open_in_browser(URL_ZIMBRA)
+        )
+        self.zimbra_from = rumps.MenuItem(
+            "   👤 —", callback=_open_in_browser(URL_ZIMBRA)
+        )
+        self.zimbra_summary = rumps.MenuItem(
+            "   💬 —", callback=_open_in_browser(URL_ZIMBRA)
+        )
+
         # ── Actions ────────────────────────────────────
         self.last_updated_btn = rumps.MenuItem(
             "Dernière mise à jour : —",
             callback=_open_in_browser(f"file://{DATA_FILE}"),
         )
         self.mail_clear_btn = rumps.MenuItem(
-            "Marquer les mails comme lus", callback=self.clear_gmail_local
+            "Marquer Gmail comme lu", callback=self.clear_gmail_local
+        )
+        self.zimbra_clear_btn = rumps.MenuItem(
+            "Marquer Zimbra comme lu", callback=self.clear_zimbra_local
         )
         self.force_update_btn = rumps.MenuItem(
             "Forcer la mise à jour", callback=self.force_update
@@ -278,8 +304,13 @@ class DashboardMenubar(rumps.App):
             self.mail_from,
             self.mail_summary,
             None,
+            self.mail_zimbra,
+            self.zimbra_from,
+            self.zimbra_summary,
+            None,
             self.last_updated_btn,
             self.mail_clear_btn,
+            self.zimbra_clear_btn,
             self.force_update_btn,
             None,
             self.quit_btn,
@@ -396,6 +427,13 @@ class DashboardMenubar(rumps.App):
         except Exception:
             pass
 
+    def _refresh_badge(self) -> None:
+        """Recalcule le badge cloche = Gmail affiché + Zimbra affiché."""
+        gmail_shown: int = 0 if self._gmail_cleared else self._last_known_unread
+        zimbra_shown: int = 0 if self._zimbra_cleared else self._last_known_unread_zimbra
+        total: int = gmail_shown + zimbra_shown
+        self.title = str(total) if total > 0 else ""
+
     def clear_gmail_local(self, _: object) -> None:
         """Marque les mails comme « lus » côté interface seulement.
 
@@ -408,7 +446,21 @@ class DashboardMenubar(rumps.App):
         self.mail_gmail.title = "✉️ Gmail : 0 non lu"
         self.mail_from.title = "   👤 —"
         self.mail_summary.title = "   💬 —"
-        self.title = ""
+        self._refresh_badge()
+
+    def clear_zimbra_local(self, _: object) -> None:
+        """Marque les mails Zimbra comme « lus » côté interface seulement.
+
+        Symétrique de clear_gmail_local : flag + seuil mémorisé. IMAP reste
+        en readonly, donc rien n'est modifié côté serveur.
+        """
+        self._zimbra_cleared = True
+        self._cleared_at_unread_zimbra = self._last_known_unread_zimbra
+        self._prev_unread_zimbra = self._last_known_unread_zimbra
+        self.mail_zimbra.title = "✉️ Zimbra : 0 non lu"
+        self.zimbra_from.title = "   👤 —"
+        self.zimbra_summary.title = "   💬 —"
+        self._refresh_badge()
 
     def force_update(self, _: object) -> None:
         """Appelle les APIs Google via gws et réécrit le JSON."""
@@ -508,23 +560,57 @@ class DashboardMenubar(rumps.App):
                             "body": body,
                         }
 
+                # ── Zimbra (IMAP) ──
+                z_user: Optional[str] = os.environ.get("ZIMBRA_USER")
+                z_pass: Optional[str] = os.environ.get("ZIMBRA_PASS")
+                prev: dict = load_data()
+                unread_zimbra: int = int(prev.get("unread_zimbra", 0))
+                latest_unread_zimbra = prev.get("latest_unread_zimbra")
+                if z_user and z_pass:
+                    prev_z: dict = prev.get("latest_unread_zimbra") or {}
+                    try:
+                        z_count, z_latest = fetch_zimbra_mailbox(z_user, z_pass)
+                        unread_zimbra = z_count
+                        if z_latest is None:
+                            latest_unread_zimbra = None
+                        else:
+                            z_dict: dict = {
+                                "id": z_latest["id"],
+                                "from": z_latest["from_"],
+                                "subject": z_latest["subject"],
+                                "snippet": z_latest["snippet"],
+                                "body": z_latest["body"],
+                            }
+                            if prev_z.get("id") == z_latest["id"] and prev_z.get("summary"):
+                                z_dict["summary"] = prev_z["summary"]
+                            latest_unread_zimbra = z_dict
+                    except Exception:
+                        pass  # fallback : valeurs précédentes
+
                 # ── Write JSON ──
                 dashboard: dict = {
                     "next_events": next_events,
                     "unread_gmail": unread_gmail,
                     "latest_unread": latest_unread,
+                    "unread_zimbra": unread_zimbra,
+                    "latest_unread_zimbra": latest_unread_zimbra,
                     "last_updated": now_local,
                 }
                 with open(DATA_FILE, "w", encoding="utf-8") as f:
                     json.dump(dashboard, f, ensure_ascii=False)
 
-                # Summarize via OpenClaw
-                if latest_unread and (latest_unread.get("body") or latest_unread.get("snippet")):
+                # Summarize via OpenClaw (Gmail + Zimbra)
+                def _needs(m) -> bool:
+                    return (isinstance(m, dict)
+                            and not m.get("summary")
+                            and bool(m.get("body") or m.get("snippet")))
+
+                if _needs(latest_unread) or _needs(latest_unread_zimbra):
                     script: str = os.path.join(_SCRIPT_DIR, "summarize_mail.py")
                     try:
                         subprocess.run(
                             [sys.executable, script],
-                            timeout=40,
+                            timeout=60,
                         )
                     except Exception:
                         pass
@@ -604,7 +690,38 @@ class DashboardMenubar(rumps.App):
             self.mail_from.title = "   👤 —"
             self.mail_summary.title = "   💬 —"
 
-        self.title = str(gmail_shown) if gmail_shown > 0 else ""
+        # ── Zimbra ────────────────────────────────────
+        zimbra_raw: int = int(data.get("unread_zimbra", 0))
+        if self._zimbra_cleared and zimbra_raw > self._cleared_at_unread_zimbra:
+            self._zimbra_cleared = False
+        self._last_known_unread_zimbra = zimbra_raw
+        zimbra_shown: int = 0 if self._zimbra_cleared else zimbra_raw
+
+        self.mail_zimbra.title = (
+            f"✉️ Zimbra : {zimbra_shown} non lu{'s' if zimbra_shown > 1 else ''}"
+        )
+
+        latest_z: object = data.get("latest_unread_zimbra")
+        if isinstance(latest_z, dict) and zimbra_shown > 0:
+            z_sender: str = _format_mail_sender(str(latest_z.get("from", "")))
+            z_summary: str = (
+                str(latest_z.get("summary", "")).strip()
+                or str(latest_z.get("subject", "")).strip()
+                or "(sans objet)"
+            )
+            if len(z_sender) > 60:
+                z_sender = z_sender[:57] + "…"
+            if len(z_summary) > 70:
+                z_summary = z_summary[:67] + "…"
+            self.zimbra_from.title = f"   👤 {z_sender}"
+            self.zimbra_summary.title = f"   💬 {z_summary}"
+        else:
+            self.zimbra_from.title = "   👤 —"
+            self.zimbra_summary.title = "   💬 —"
+
+        # ── Badge cloche : Gmail + Zimbra ─────────────
+        total_shown: int = gmail_shown + zimbra_shown
+        self.title = str(total_shown) if total_shown > 0 else ""
         last_upd: str = str(data.get("last_updated", ""))
         if last_upd:
             try:
@@ -631,6 +748,16 @@ class DashboardMenubar(rumps.App):
                 subtitle=f"Gmail : {gmail} non lu{'s' if gmail > 1 else ''}",
             )
         self._prev_unread_total = gmail
+
+        zimbra: int = int(data.get("unread_zimbra", 0))
+        if zimbra > self._prev_unread_zimbra:
+            diff_z: int = zimbra - self._prev_unread_zimbra
+            send_notification(
+                title="📧 Nouveaux mails Zimbra",
+                message=f"{diff_z} nouveau{'x' if diff_z > 1 else ''} mail{'s' if diff_z > 1 else ''}",
+                subtitle=f"Zimbra : {zimbra} non lu{'s' if zimbra > 1 else ''}",
+            )
+        self._prev_unread_zimbra = zimbra
 
         event: Optional[dict] = _extract_event(data)
         if event is not None:

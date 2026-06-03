@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """
-Summarize Mail — Résume le dernier mail via OpenClaw
+Summarize Mail — Résume les derniers mails non lus via OpenClaw
 
-Lit le body du dernier mail non lu depuis dashboard.json,
-demande un résumé court à OpenClaw (openclaw infer model run),
-et écrit le résultat dans le champ `summary` du JSON.
+Lit dashboard.json et, pour chaque boîte sans résumé existant :
+  - latest_unread (Gmail) ;
+  - latest_unread_zimbra (Zimbra).
 
-Conçu pour être appelé par dashboard_update.py après chaque collecte.
+Demande un résumé court à OpenClaw (openclaw infer model run) et écrit
+le champ `summary` dans le JSON.
+
+Appelé par dashboard_update.py après chaque collecte (ou manuellement).
 """
 
 import json
@@ -20,25 +23,17 @@ MAX_BODY_CHARS: int = 3000
 MAX_SUMMARY_CHARS: int = 100
 
 
-def main() -> None:
-    if not os.path.exists(DATA_FILE):
-        print("No dashboard file found", file=sys.stderr)
-        return
+def _summarize_one(latest: dict) -> bool:
+    """Résume un mail (dict avec from/subject/body/snippet) et écrit `summary`.
 
-    with open(DATA_FILE, "r", encoding="utf-8") as f:
-        data: dict = json.load(f)
-
-    latest: object = data.get("latest_unread")
-    if not isinstance(latest, dict):
-        print("No unread mail to summarize")
-        return
-
+    Préconditions : latest est un dict mutable.
+    Retour : True si un résumé a été écrit dans latest, False sinon.
+    """
     body: str = latest.get("body", "").strip()
     if not body:
         body = latest.get("snippet", "").strip()
     if not body:
-        print("No mail body to summarize")
-        return
+        return False
 
     if len(body) > MAX_BODY_CHARS:
         body = body[:MAX_BODY_CHARS] + "…"
@@ -70,7 +65,7 @@ def main() -> None:
         )
         if result.returncode != 0:
             print(f"OpenClaw error: {result.stderr.strip()}", file=sys.stderr)
-            return
+            return False
 
         # Strip openclaw CLI metadata lines from output
         raw_lines: list[str] = result.stdout.strip().split("\n")
@@ -81,22 +76,43 @@ def main() -> None:
         summary: str = "\n".join(content_lines).strip()
         if not summary:
             print("Empty summary returned", file=sys.stderr)
-            return
+            return False
 
         if len(summary) > MAX_SUMMARY_CHARS:
             summary = summary[: MAX_SUMMARY_CHARS - 1] + "…"
 
         latest["summary"] = summary
-
-        with open(DATA_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False)
-
         print(f"OK — {summary}")
+        return True
 
     except subprocess.TimeoutExpired:
         print("OpenClaw timeout", file=sys.stderr)
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
+    return False
+
+
+def main() -> None:
+    if not os.path.exists(DATA_FILE):
+        print("No dashboard file found", file=sys.stderr)
+        return
+
+    with open(DATA_FILE, "r", encoding="utf-8") as f:
+        data: dict = json.load(f)
+
+    changed: bool = False
+    # On résume Gmail et Zimbra, mais seulement si pas déjà fait.
+    for key in ("latest_unread", "latest_unread_zimbra"):
+        latest: object = data.get(key)
+        if isinstance(latest, dict) and not latest.get("summary"):
+            if _summarize_one(latest):
+                changed = True
+
+    if changed:
+        with open(DATA_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+    else:
+        print("Nothing to summarize")
 
 
 if __name__ == "__main__":
