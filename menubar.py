@@ -237,12 +237,10 @@ class DashboardMenubar(rumps.App):
         self._prev_unread_total: int = 0
         self._prev_event_title: Optional[str] = None
         self._gmail_cleared: bool = False
-        self._cleared_at_unread: int = 0
         self._last_known_unread: int = 0
         # Zimbra : mêmes mécaniques que Gmail.
         self._prev_unread_zimbra: int = 0
         self._zimbra_cleared: bool = False
-        self._cleared_at_unread_zimbra: int = 0
         self._last_known_unread_zimbra: int = 0
         self._button_configured: bool = False
         self._update_lock: threading.Lock = threading.Lock()
@@ -442,7 +440,6 @@ class DashboardMenubar(rumps.App):
         nouveau mail (au-delà du seuil) n'arrive, l'UI affiche 0.
         """
         self._gmail_cleared = True
-        self._cleared_at_unread = self._last_known_unread
         self._prev_unread_total = self._last_known_unread
         self.mail_gmail.title = "✉️ Gmail : 0 non lu"
         self.mail_from.title = "   👤 —"
@@ -456,7 +453,6 @@ class DashboardMenubar(rumps.App):
         en readonly, donc rien n'est modifié côté serveur.
         """
         self._zimbra_cleared = True
-        self._cleared_at_unread_zimbra = self._last_known_unread_zimbra
         self._prev_unread_zimbra = self._last_known_unread_zimbra
         self.mail_zimbra.title = "✉️ Zimbra : 0 non lu"
         self.zimbra_from.title = "   👤 —"
@@ -698,7 +694,10 @@ class DashboardMenubar(rumps.App):
 
         # ── Gmail ─────────────────────────────────────
         gmail_raw: int = int(data.get("unread_gmail", 0))
-        if self._gmail_cleared and gmail_raw > self._cleared_at_unread:
+        # Un nouveau mail (compteur en hausse vs la lecture précédente) annule
+        # le « marqué comme lu » manuel — même si le total était repassé bas
+        # entre-temps (mails lus puis nouveau mail).
+        if self._gmail_cleared and gmail_raw > self._last_known_unread:
             self._gmail_cleared = False
         self._last_known_unread = gmail_raw
         gmail_shown: int = 0 if self._gmail_cleared else gmail_raw
@@ -733,7 +732,7 @@ class DashboardMenubar(rumps.App):
 
         # ── Zimbra ────────────────────────────────────
         zimbra_raw: int = int(data.get("unread_zimbra", 0))
-        if self._zimbra_cleared and zimbra_raw > self._cleared_at_unread_zimbra:
+        if self._zimbra_cleared and zimbra_raw > self._last_known_unread_zimbra:
             self._zimbra_cleared = False
         self._last_known_unread_zimbra = zimbra_raw
         zimbra_shown: int = 0 if self._zimbra_cleared else zimbra_raw
