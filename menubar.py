@@ -148,6 +148,35 @@ def _format_mail_sender(from_header: str) -> str:
     return raw
 
 
+def _mail_notification_content(
+    source_label: str,
+    mail: Optional[dict],
+) -> tuple[str, str, str]:
+    """Construit title / subtitle / message pour une notif mail native.
+
+    Format affiché dans le Centre de notifications :
+      - title    : Gmail | Zimbra
+      - subtitle : auteur (en-tête From)
+      - message  : résumé OpenClaw, ou sujet en repli
+
+    Précondition : `source_label` non vide.
+    """
+    title: str = source_label
+    if not isinstance(mail, dict):
+        return title, "—", "Nouveau message non lu"
+    author: str = _format_mail_sender(str(mail.get("from", "")))
+    summary: str = (
+        str(mail.get("summary", "")).strip()
+        or str(mail.get("subject", "")).strip()
+        or "(sans objet)"
+    )
+    if len(author) > 60:
+        author = author[:57] + "…"
+    if len(summary) > 120:
+        summary = summary[:117] + "…"
+    return title, author, summary
+
+
 def _extract_event(data: dict) -> Optional[dict]:
     """Renvoie le prochain événement pertinent (ou None).
 
@@ -643,21 +672,11 @@ class DashboardMenubar(rumps.App):
           - à la sortie : `seen == current_ids` et `active ⊆ current_ids`.
         """
         for mid in current_ids - seen:
-            title: str
-            subtitle: str
-            message: str
-            if isinstance(latest, dict) and str(latest.get("id", "")) == mid:
-                title = f"📧 {source_label}"
-                subtitle = _format_mail_sender(str(latest.get("from", "")))
-                message = (
-                    str(latest.get("summary", "")).strip()
-                    or str(latest.get("subject", "")).strip()
-                    or "(sans objet)"
-                )
-            else:
-                title = f"📧 Nouvel email {source_label}"
-                subtitle = ""
-                message = "Nouveau message non lu"
+            mail: Optional[dict] = (
+                latest if isinstance(latest, dict) and str(latest.get("id", "")) == mid
+                else None
+            )
+            title, subtitle, message = _mail_notification_content(source_label, mail)
             mac_notify.deliver(f"{prefix}-{mid}", title, message, subtitle)
             active.add(mid)
             seen.add(mid)
