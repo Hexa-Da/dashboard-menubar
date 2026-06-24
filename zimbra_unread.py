@@ -97,13 +97,15 @@ def fetch_zimbra_mailbox(
     port: int = DEFAULT_PORT,
     mailbox: str = "INBOX",
     timeout: int = DEFAULT_TIMEOUT,
-) -> tuple[int, Optional[ZimbraLatestMail]]:
-    """Retourne (nb_non_lus, dernier_non_lu | None).
+) -> tuple[int, Optional[ZimbraLatestMail], list[str]]:
+    """Retourne (nb_non_lus, dernier_non_lu | None, liste_uids_non_lus).
 
     Préconditions : user et password non vides.
     Invariants :
       - la boîte est ouverte en readonly (BODY.PEEK) → ne marque rien lu ;
       - on identifie les mails par UID (stable), pas par numéro de séquence ;
+      - la liste d'UID retournée est en str (alignée sur `ZimbraLatestMail.id`),
+        triée par UID croissant (le dernier = le plus récent) ;
       - la connexion IMAP est toujours fermée en finally.
     """
     if not user or not password:
@@ -122,8 +124,9 @@ def fetch_zimbra_mailbox(
 
         uids: list[bytes] = data[0].split()
         count: int = len(uids)
+        uid_strs: list[str] = [u.decode("ascii", errors="replace") for u in uids]
         if count == 0:
-            return 0, None
+            return 0, None, []
 
         # UID croissants → le plus élevé = le plus récent.
         last_uid: bytes = uids[-1]
@@ -132,8 +135,8 @@ def fetch_zimbra_mailbox(
         # BODY.PEEK[] récupère tout sans marquer comme lu, on parse ensuite.
         status, msg_data = conn.uid("fetch", last_uid, "(BODY.PEEK[])")
         if status != "OK" or not msg_data or not isinstance(msg_data[0], tuple):
-            # On a le compte mais pas le détail : renvoyer au moins le count.
-            return count, None
+            # On a le compte mais pas le détail : renvoyer au moins le count + uids.
+            return count, None, uid_strs
 
         raw: bytes = msg_data[0][1]
         msg: email.message.Message = email.message_from_bytes(raw)
@@ -152,7 +155,7 @@ def fetch_zimbra_mailbox(
             "snippet": snippet,
             "body": body,
         }
-        return count, latest
+        return count, latest, uid_strs
     finally:
         try:
             conn.logout()
@@ -177,7 +180,7 @@ def main() -> None:
         sys.exit(1)
 
     try:
-        count, latest = fetch_zimbra_mailbox(user, password, host=host, port=port)
+        count, latest, _uids = fetch_zimbra_mailbox(user, password, host=host, port=port)
     except imaplib.IMAP4.error as e:
         print(f"Erreur IMAP (login/serveur ?) : {e}", file=sys.stderr)
         sys.exit(2)

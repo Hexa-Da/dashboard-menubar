@@ -116,6 +116,7 @@ def main() -> None:
     count_ok: bool = False
     unread_gmail: int = 0
     first_msg_id: Optional[str] = None
+    unread_gmail_ids: list[str] = []
     gmail: Optional[subprocess.CompletedProcess[str]] = None
     try:
         gmail = subprocess.run(
@@ -132,6 +133,7 @@ def main() -> None:
             count_ok = True
             messages: list = json.loads(gmail.stdout).get("messages", [])
             unread_gmail = len(messages)
+            unread_gmail_ids = [m.get("id") for m in messages if m.get("id")]
             if messages:
                 first_msg_id = messages[0].get("id")
     except Exception as e:
@@ -153,8 +155,11 @@ def main() -> None:
     if not count_ok:
         # Compte indisponible (timeout/auth) : on préserve l'état précédent
         # en entier plutôt que d'afficher 0 mail non lu à tort.
+        # Invariant : préserver aussi unread_gmail_ids, sinon le menubar croirait
+        # que tous les mails ont disparu et retirerait toutes les notifications.
         unread_gmail = int(previous.get("unread_gmail", 0))
         latest_unread = previous.get("latest_unread")
+        unread_gmail_ids = list(previous.get("unread_gmail_ids", []))
     elif first_msg_id:
         prev_latest: dict = previous.get("latest_unread") or {}
         try:
@@ -205,13 +210,17 @@ def main() -> None:
     z_pass: Optional[str] = os.environ.get("ZIMBRA_PASS")
     unread_zimbra: int = int(previous.get("unread_zimbra", 0))
     latest_unread_zimbra = previous.get("latest_unread_zimbra")
+    # Invariant : par défaut on conserve les UID précédents ; ils ne sont écrasés
+    # qu'en cas de fetch IMAP réussi (sinon le menubar retirerait à tort les notifs).
+    unread_zimbra_ids: list[str] = list(previous.get("unread_zimbra_ids", []))
     # disabled = pas de compte configuré ; ok/error = tentative IMAP réelle.
     zimbra_status: str = "disabled"
     if z_user and z_pass:
         prev_z: dict = previous.get("latest_unread_zimbra") or {}
         try:
-            z_count, z_latest = fetch_zimbra_mailbox(z_user, z_pass)
+            z_count, z_latest, z_uids = fetch_zimbra_mailbox(z_user, z_pass)
             unread_zimbra = z_count
+            unread_zimbra_ids = z_uids
             zimbra_status = "ok"
             if z_latest is None:
                 latest_unread_zimbra = None
@@ -236,10 +245,12 @@ def main() -> None:
     dashboard: dict = {
         "next_events": next_events,
         "unread_gmail": unread_gmail,
+        "unread_gmail_ids": unread_gmail_ids,
         "gmail_status": gmail_status,
         "gws_auth_status": gws_auth_status,
         "latest_unread": latest_unread,
         "unread_zimbra": unread_zimbra,
+        "unread_zimbra_ids": unread_zimbra_ids,
         "zimbra_status": zimbra_status,
         "latest_unread_zimbra": latest_unread_zimbra,
         "last_updated": now_local,

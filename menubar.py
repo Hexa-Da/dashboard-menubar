@@ -28,6 +28,7 @@ import rumps
 from AppKit import NSApplication, NSApplicationActivationPolicyAccessory, NSImageLeft
 from Foundation import NSProcessInfo, NSActivityUserInitiatedAllowingIdleSystemSleep
 
+import mac_notify
 from load_env import load_project_env
 
 load_project_env()
@@ -222,6 +223,17 @@ class DashboardMenubar(rumps.App):
         self._prev_unread_zimbra: int = 0
         self._zimbra_cleared: bool = False
         self._last_known_unread_zimbra: int = 0
+
+        # Notifications natives par mail (cf. mac_notify) :
+        #  - _seen_*  : id déjà traités → on ne re-notifie jamais le même mail ;
+        #  - _active_*: id dont une bannière est actuellement affichée (⊆ _seen),
+        #               donc supprimables au « marquer comme lu » ou à leur
+        #               disparition de dashboard.json.
+        self._notif_initialized: bool = False
+        self._seen_gmail_ids: set[str] = set()
+        self._active_gmail_notifs: set[str] = set()
+        self._seen_zimbra_ids: set[str] = set()
+        self._active_zimbra_notifs: set[str] = set()
         self._button_configured: bool = False
         self._update_lock: threading.Lock = threading.Lock()
 
@@ -421,6 +433,12 @@ class DashboardMenubar(rumps.App):
         """
         self._gmail_cleared = True
         self._prev_unread_total = self._last_known_unread
+        # Retire les bannières affichées SANS vider `_seen_gmail_ids` : les mails
+        # restent non lus côté serveur, on ne veut donc pas les re-notifier au
+        # prochain refresh.
+        for mid in list(self._active_gmail_notifs):
+            mac_notify.remove(f"gmail-{mid}")
+        self._active_gmail_notifs.clear()
         self.mail_gmail.title = "✉️ Gmail : 0 non lu"
         self.mail_from.title = "   👤 —"
         self.mail_summary.title = "   💬 —"
@@ -434,6 +452,10 @@ class DashboardMenubar(rumps.App):
         """
         self._zimbra_cleared = True
         self._prev_unread_zimbra = self._last_known_unread_zimbra
+        # Symétrique de clear_gmail_local : retire les bannières, garde `_seen`.
+        for mid in list(self._active_zimbra_notifs):
+            mac_notify.remove(f"zimbra-{mid}")
+        self._active_zimbra_notifs.clear()
         self.mail_zimbra.title = "✉️ Zimbra : 0 non lu"
         self.zimbra_from.title = "   👤 —"
         self.zimbra_summary.title = "   💬 —"
@@ -596,32 +618,87 @@ class DashboardMenubar(rumps.App):
         else:
             self.last_updated_btn.title = "Dernière mise à jour : —"
 
-    def _check_notifications(self, data: dict) -> None:
-        """Émet une notification si nouveau mail ou changement d'événement.
+    def _sync_mail_notifications(
+        self,
+        *,
+        prefix: str,
+        source_label: str,
+        current_ids: set[str],
+        seen: set[str],
+        active: set[str],
+        latest: Optional[dict],
+    ) -> None:
+        """Aligne les notifications natives d'une source mail sur `current_ids`.
 
-        Invariant : on ne notifie un nouveau mail QUE si `gmail` dépasse
-        `_prev_unread_total`. `clear_gmail_local` aligne ce seuil pour
-        éviter de re-notifier des mails déjà « marqués lus » côté UI.
+        Préconditions :
+          - appelée depuis le main thread (mac_notify n'est pas thread-safe) ;
+          - `seen` et `active` sont les ensembles d'état de la source, mutés
+            EN PLACE (jamais réaffectés, sinon l'attribut d'instance perdrait
+            la mise à jour).
+        Invariants :
+          - un id absent de `seen` est notifié une seule fois, puis ajouté à
+            `seen` et `active` (anti double-notification) ;
+          - un id disparu de `current_ids` voit sa bannière retirée si elle
+            était active, puis est oublié de `seen` et `active` ;
+          - à la sortie : `seen == current_ids` et `active ⊆ current_ids`.
         """
-        gmail: int = int(data.get("unread_gmail", 0))
-        if gmail > self._prev_unread_total:
-            diff: int = gmail - self._prev_unread_total
-            send_notification(
-                title="📧 Nouveaux emails",
-                message=f"{diff} nouveau{'x' if diff > 1 else ''} email{'s' if diff > 1 else ''}",
-                subtitle=f"Gmail : {gmail} non lu{'s' if gmail > 1 else ''}",
-            )
-        self._prev_unread_total = gmail
+        for mid in current_ids - seen:
+            title: str
+            subtitle: str
+            message: str
+            if isinstance(latest, dict) and str(latest.get("id", "")) == mid:
+                title = f"📧 {source_label}"
+                subtitle = _format_mail_sender(str(latest.get("from", "")))
+                message = (
+                    str(latest.get("summary", "")).strip()
+                    or str(latest.get("subject", "")).strip()
+                    or "(sans objet)"
+                )
+            else:
+                title = f"📧 Nouvel email {source_label}"
+                subtitle = ""
+                message = "Nouveau message non lu"
+            mac_notify.deliver(f"{prefix}-{mid}", title, message, subtitle)
+            active.add(mid)
+            seen.add(mid)
 
-        zimbra: int = int(data.get("unread_zimbra", 0))
-        if zimbra > self._prev_unread_zimbra:
-            diff_z: int = zimbra - self._prev_unread_zimbra
-            send_notification(
-                title="📧 Nouveaux mails Zimbra",
-                message=f"{diff_z} nouveau{'x' if diff_z > 1 else ''} mail{'s' if diff_z > 1 else ''}",
-                subtitle=f"Zimbra : {zimbra} non lu{'s' if zimbra > 1 else ''}",
+        for mid in seen - current_ids:
+            if mid in active:
+                mac_notify.remove(f"{prefix}-{mid}")
+                active.discard(mid)
+            seen.discard(mid)
+
+    def _check_notifications(self, data: dict) -> None:
+        """Émet/retire les notifications mail (par id) et notifie les événements.
+
+        Invariant : au tout premier passage on AMORCE les id non lus déjà
+        présents sans émettre de notification (évite un burst au démarrage) ;
+        les passages suivants délèguent à `_sync_mail_notifications`.
+        """
+        gmail_ids: set[str] = {str(x) for x in data.get("unread_gmail_ids", []) if x}
+        zimbra_ids: set[str] = {str(x) for x in data.get("unread_zimbra_ids", []) if x}
+
+        if not self._notif_initialized:
+            self._seen_gmail_ids = set(gmail_ids)
+            self._seen_zimbra_ids = set(zimbra_ids)
+            self._notif_initialized = True
+        else:
+            self._sync_mail_notifications(
+                prefix="gmail",
+                source_label="Gmail",
+                current_ids=gmail_ids,
+                seen=self._seen_gmail_ids,
+                active=self._active_gmail_notifs,
+                latest=data.get("latest_unread"),
             )
-        self._prev_unread_zimbra = zimbra
+            self._sync_mail_notifications(
+                prefix="zimbra",
+                source_label="Zimbra",
+                current_ids=zimbra_ids,
+                seen=self._seen_zimbra_ids,
+                active=self._active_zimbra_notifs,
+                latest=data.get("latest_unread_zimbra"),
+            )
 
         event: Optional[dict] = _extract_event(data)
         if event is not None:
