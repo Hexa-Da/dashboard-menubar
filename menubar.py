@@ -41,6 +41,10 @@ _SCRIPT_DIR: str = os.path.dirname(os.path.abspath(__file__))
 DATA_FILE: str = os.path.join(_SCRIPT_DIR, "dashboard.json")
 REFRESH_INTERVAL: int = 10  # secondes entre deux relectures du JSON
 UPDATE_INTERVAL: int = 120  # secondes entre deux fetch gws (collecte des données)
+# Nb max de ticks de refresh pendant lesquels on diffère une notif mail en
+# attendant le résumé OpenClaw. Garde-fou : au-delà, on notifie quand même
+# (si OpenClaw échoue, ne jamais notifier serait pire). ~2 min à 10 s/tick.
+MAX_NOTIF_DEFER_TICKS: int = 12
 UPDATE_SCRIPT: str = os.path.join(_SCRIPT_DIR, "dashboard_update.py")
 UPDATE_LOG: str = os.path.join(_SCRIPT_DIR, "logs", "dashboard-update.log")
 ICON_BELL: str = os.path.join(_SCRIPT_DIR, "assets", "bell.png")
@@ -148,6 +152,26 @@ def _format_mail_sender(from_header: str) -> str:
     return raw
 
 
+def _mail_notification_body(mail: dict) -> str:
+    """Corps de la notif = résumé OpenClaw uniquement (jamais le sujet).
+
+    Précondition : `mail` est un dict non vide.
+    Invariant : tant que le résumé n'est pas prêt, on affiche un extrait ou
+    un libellé d'attente — le sujet n'est jamais utilisé comme corps.
+    """
+    summary: str = str(mail.get("summary", "")).strip()
+    if summary:
+        if len(summary) > 120:
+            return summary[:117] + "…"
+        return summary
+    snippet: str = str(mail.get("snippet", "")).strip()
+    if snippet:
+        if len(snippet) > 120:
+            return snippet[:117] + "…"
+        return snippet
+    return "Résumé en cours…"
+
+
 def _mail_notification_content(
     source_label: str,
     mail: Optional[dict],
@@ -157,7 +181,7 @@ def _mail_notification_content(
     Format affiché dans le Centre de notifications :
       - title    : Gmail | Zimbra
       - subtitle : auteur (en-tête From)
-      - message  : résumé OpenClaw, ou sujet en repli
+      - message  : résumé OpenClaw (pas le sujet)
 
     Précondition : `source_label` non vide.
     """
@@ -165,16 +189,10 @@ def _mail_notification_content(
     if not isinstance(mail, dict):
         return title, "—", "Nouveau message non lu"
     author: str = _format_mail_sender(str(mail.get("from", "")))
-    summary: str = (
-        str(mail.get("summary", "")).strip()
-        or str(mail.get("subject", "")).strip()
-        or "(sans objet)"
-    )
+    body: str = _mail_notification_body(mail)
     if len(author) > 60:
         author = author[:57] + "…"
-    if len(summary) > 120:
-        summary = summary[:117] + "…"
-    return title, author, summary
+    return title, author, body
 
 
 def _extract_event(data: dict) -> Optional[dict]:
@@ -253,16 +271,19 @@ class DashboardMenubar(rumps.App):
         self._zimbra_cleared: bool = False
         self._last_known_unread_zimbra: int = 0
 
-        # Notifications natives par mail (cf. mac_notify) :
-        #  - _seen_*  : id déjà traités → on ne re-notifie jamais le même mail ;
-        #  - _active_*: id dont une bannière est actuellement affichée (⊆ _seen),
-        #               donc supprimables au « marquer comme lu » ou à leur
-        #               disparition de dashboard.json.
+        # Notifications natives par source (cf. mac_notify) :
+        #  Une seule notification par source (gmail-current / zimbra-current) pour
+        #  éviter l'empilement.  _seen_* garde les ids déjà vus (anti-re-notif) ;
+        #  _active_*_id est l'id du mail représenté dans la notif visible ("" = aucune).
         self._notif_initialized: bool = False
         self._seen_gmail_ids: set[str] = set()
-        self._active_gmail_notifs: set[str] = set()
+        self._active_gmail_id: str = ""
+        self._active_gmail_body: str = ""
+        self._notif_defer_gmail: int = 0
         self._seen_zimbra_ids: set[str] = set()
-        self._active_zimbra_notifs: set[str] = set()
+        self._active_zimbra_id: str = ""
+        self._active_zimbra_body: str = ""
+        self._notif_defer_zimbra: int = 0
         self._button_configured: bool = False
         self._update_lock: threading.Lock = threading.Lock()
 
@@ -462,12 +483,13 @@ class DashboardMenubar(rumps.App):
         """
         self._gmail_cleared = True
         self._prev_unread_total = self._last_known_unread
-        # Retire les bannières affichées SANS vider `_seen_gmail_ids` : les mails
+        # Retire la bannière affichée SANS vider `_seen_gmail_ids` : les mails
         # restent non lus côté serveur, on ne veut donc pas les re-notifier au
         # prochain refresh.
-        for mid in list(self._active_gmail_notifs):
-            mac_notify.remove(f"gmail-{mid}")
-        self._active_gmail_notifs.clear()
+        if self._active_gmail_id:
+            mac_notify.remove("gmail-current")
+            self._active_gmail_id = ""
+            self._active_gmail_body = ""
         self.mail_gmail.title = "✉️ Gmail : 0 non lu"
         self.mail_from.title = "   👤 —"
         self.mail_summary.title = "   💬 —"
@@ -481,10 +503,11 @@ class DashboardMenubar(rumps.App):
         """
         self._zimbra_cleared = True
         self._prev_unread_zimbra = self._last_known_unread_zimbra
-        # Symétrique de clear_gmail_local : retire les bannières, garde `_seen`.
-        for mid in list(self._active_zimbra_notifs):
-            mac_notify.remove(f"zimbra-{mid}")
-        self._active_zimbra_notifs.clear()
+        # Symétrique de clear_gmail_local : retire la bannière, garde `_seen`.
+        if self._active_zimbra_id:
+            mac_notify.remove("zimbra-current")
+            self._active_zimbra_id = ""
+            self._active_zimbra_body = ""
         self.mail_zimbra.title = "✉️ Zimbra : 0 non lu"
         self.zimbra_from.title = "   👤 —"
         self.zimbra_summary.title = "   💬 —"
@@ -654,38 +677,80 @@ class DashboardMenubar(rumps.App):
         source_label: str,
         current_ids: set[str],
         seen: set[str],
-        active: set[str],
+        active_id: str,
+        last_body: str,
+        defer_count: int,
         latest: Optional[dict],
-    ) -> None:
-        """Aligne les notifications natives d'une source mail sur `current_ids`.
+    ) -> tuple[str, str, int]:
+        """Aligne la notification unique d'une source mail sur `current_ids`.
 
         Préconditions :
           - appelée depuis le main thread (mac_notify n'est pas thread-safe) ;
-          - `seen` et `active` sont les ensembles d'état de la source, mutés
-            EN PLACE (jamais réaffectés, sinon l'attribut d'instance perdrait
-            la mise à jour).
+          - `seen` est muté EN PLACE.
+        Retour : `(active_id, last_body, defer_count)` — id/corps affichés et
+        nombre de ticks pendant lesquels on a différé l'émission.
         Invariants :
-          - un id absent de `seen` est notifié une seule fois, puis ajouté à
-            `seen` et `active` (anti double-notification) ;
-          - un id disparu de `current_ids` voit sa bannière retirée si elle
-            était active, puis est oublié de `seen` et `active` ;
-          - à la sortie : `seen == current_ids` et `active ⊆ current_ids`.
+          - une seule bannière par source (identifiant fixe `{prefix}-current`) ;
+          - on NE notifie PAS un nouveau mail tant que son résumé OpenClaw n'est
+            pas prêt (corps = résumé) ; garde-fou MAX_NOTIF_DEFER_TICKS pour ne
+            jamais bloquer indéfiniment si le résumé n'arrive pas ;
+          - tant qu'on diffère, les ids ne sont pas marqués « vus » (on réévalue
+            au tick suivant) ;
+          - à la sortie d'une émission : `seen == current_ids`.
         """
-        for mid in current_ids - seen:
-            mail: Optional[dict] = (
-                latest if isinstance(latest, dict) and str(latest.get("id", "")) == mid
-                else None
-            )
-            title, subtitle, message = _mail_notification_content(source_label, mail)
-            mac_notify.deliver(f"{prefix}-{mid}", title, message, subtitle)
-            active.add(mid)
-            seen.add(mid)
+        new_ids: set[str] = current_ids - seen
 
-        for mid in seen - current_ids:
-            if mid in active:
-                mac_notify.remove(f"{prefix}-{mid}")
-                active.discard(mid)
-            seen.discard(mid)
+        # Oublier les ids disparus du JSON (ne plus les considérer comme "vus").
+        seen.difference_update(seen - current_ids)
+
+        notif_id: str = f"{prefix}-current"
+
+        if new_ids:
+            latest_id: str = (
+                str(latest.get("id", "")) if isinstance(latest, dict) else ""
+            )
+            summary_ready: bool = (
+                isinstance(latest, dict) and bool(str(latest.get("summary", "")).strip())
+            )
+            has_text: bool = isinstance(latest, dict) and bool(
+                str(latest.get("body", "")).strip() or str(latest.get("snippet", "")).strip()
+            )
+            # Un résumé est ATTENDU si le mail à afficher a du texte mais pas
+            # encore de résumé (summarize_mail.py va le calculer sous peu).
+            summary_pending: bool = (
+                latest_id in new_ids and has_text and not summary_ready
+            )
+
+            if summary_pending and defer_count < MAX_NOTIF_DEFER_TICKS:
+                # On diffère : ni émission, ni marquage « vu » → réévalué au tick
+                # suivant, où le résumé sera probablement disponible.
+                return active_id, last_body, defer_count + 1
+
+            # Émission (résumé prêt, ou pas de résumé attendu, ou garde-fou atteint).
+            title, subtitle, message = _mail_notification_content(source_label, latest)
+            mac_notify.deliver(notif_id, title, message, subtitle)
+            seen.update(new_ids)
+            emitted_id: str = latest_id or next(iter(new_ids))
+            return emitted_id, message, 0
+
+        # Aucun nouveau mail : retirer la bannière si le mail qu'elle représentait
+        # n'est plus non-lu (a été lu ailleurs).
+        if active_id and active_id not in current_ids:
+            mac_notify.remove(notif_id)
+            return "", "", 0
+
+        # Résumé OpenClaw arrivé après une émission au garde-fou → MAJ du corps.
+        if (
+            active_id
+            and isinstance(latest, dict)
+            and str(latest.get("id", "")) == active_id
+        ):
+            title, subtitle, message = _mail_notification_content(source_label, latest)
+            if message != last_body:
+                mac_notify.deliver(notif_id, title, message, subtitle)
+                return active_id, message, 0
+
+        return active_id, last_body, defer_count
 
     def _check_notifications(self, data: dict) -> None:
         """Émet/retire les notifications mail (par id) et notifie les événements.
@@ -702,20 +767,32 @@ class DashboardMenubar(rumps.App):
             self._seen_zimbra_ids = set(zimbra_ids)
             self._notif_initialized = True
         else:
-            self._sync_mail_notifications(
+            (
+                self._active_gmail_id,
+                self._active_gmail_body,
+                self._notif_defer_gmail,
+            ) = self._sync_mail_notifications(
                 prefix="gmail",
                 source_label="Gmail",
                 current_ids=gmail_ids,
                 seen=self._seen_gmail_ids,
-                active=self._active_gmail_notifs,
+                active_id=self._active_gmail_id,
+                last_body=self._active_gmail_body,
+                defer_count=self._notif_defer_gmail,
                 latest=data.get("latest_unread"),
             )
-            self._sync_mail_notifications(
+            (
+                self._active_zimbra_id,
+                self._active_zimbra_body,
+                self._notif_defer_zimbra,
+            ) = self._sync_mail_notifications(
                 prefix="zimbra",
                 source_label="Zimbra",
                 current_ids=zimbra_ids,
                 seen=self._seen_zimbra_ids,
-                active=self._active_zimbra_notifs,
+                active_id=self._active_zimbra_id,
+                last_body=self._active_zimbra_body,
+                defer_count=self._notif_defer_zimbra,
                 latest=data.get("latest_unread_zimbra"),
             )
 
