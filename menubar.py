@@ -180,19 +180,21 @@ def _mail_notification_content(
 
     Format affiché dans le Centre de notifications :
       - title    : Gmail | Zimbra
-      - subtitle : auteur (en-tête From)
-      - message  : résumé OpenClaw (pas le sujet)
+      - subtitle : « Auteur : résumé » (une seule ligne)
 
     Précondition : `source_label` non vide.
     """
     title: str = source_label
     if not isinstance(mail, dict):
-        return title, "—", "Nouveau message non lu"
+        return title, "— : Nouveau message non lu", ""
     author: str = _format_mail_sender(str(mail.get("from", "")))
-    body: str = _mail_notification_body(mail)
+    summary: str = _mail_notification_body(mail)
     if len(author) > 60:
         author = author[:57] + "…"
-    return title, author, body
+    line: str = f"{author} : {summary}"
+    if len(line) > 180:
+        line = line[:177] + "…"
+    return title, line, ""
 
 
 def _extract_event(data: dict) -> Optional[dict]:
@@ -731,7 +733,7 @@ class DashboardMenubar(rumps.App):
             mac_notify.deliver(notif_id, title, message, subtitle)
             seen.update(new_ids)
             emitted_id: str = latest_id or next(iter(new_ids))
-            return emitted_id, message, 0
+            return emitted_id, subtitle, 0
 
         # Aucun nouveau mail : retirer la bannière si le mail qu'elle représentait
         # n'est plus non-lu (a été lu ailleurs).
@@ -746,9 +748,9 @@ class DashboardMenubar(rumps.App):
             and str(latest.get("id", "")) == active_id
         ):
             title, subtitle, message = _mail_notification_content(source_label, latest)
-            if message != last_body:
+            if subtitle != last_body:
                 mac_notify.deliver(notif_id, title, message, subtitle)
-                return active_id, message, 0
+                return active_id, subtitle, 0
 
         return active_id, last_body, defer_count
 
