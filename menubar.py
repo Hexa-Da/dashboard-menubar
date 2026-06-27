@@ -17,16 +17,22 @@ Prérequis : `pip install rumps pyobjc-framework-Cocoa`.
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import threading
+import time
 from datetime import datetime, timedelta
 from email.utils import parseaddr
 from typing import Callable, Optional
 
 import rumps
 from AppKit import NSApplication, NSApplicationActivationPolicyAccessory, NSImageLeft
-from Foundation import NSProcessInfo, NSActivityUserInitiatedAllowingIdleSystemSleep
+from Foundation import (
+    NSActivityUserInitiatedAllowingIdleSystemSleep,
+    NSOperationQueue,
+    NSProcessInfo,
+)
 
 import mac_notify
 from load_env import load_project_env
@@ -47,6 +53,12 @@ UPDATE_INTERVAL: int = 120  # secondes entre deux fetch gws (collecte des donné
 MAX_NOTIF_DEFER_TICKS: int = 12
 UPDATE_SCRIPT: str = os.path.join(_SCRIPT_DIR, "dashboard_update.py")
 UPDATE_LOG: str = os.path.join(_SCRIPT_DIR, "logs", "dashboard-update.log")
+# Watchdog indépendant des NSTimer (peuvent cesser après veille / App Nap).
+WATCHDOG_INTERVAL: int = 30  # secondes entre deux contrôles
+STALE_DATA_SECONDS: int = UPDATE_INTERVAL + 60  # JSON trop vieux → fetch
+STALE_TICK_SECONDS: int = 45  # refresh timer (10 s) n'a pas tiré → recovery
+STALE_RESTART_SECONDS: int = 180  # recovery inefficace → redémarrage KeepAlive
+UPDATE_LOCK_TIMEOUT: int = 160  # secondes (aligné timeout subprocess + marge)
 ICON_BELL: str = os.path.join(_SCRIPT_DIR, "assets", "bell.png")
 ICON_MENUBAR_HEIGHT: float = 21.0  # hauteur cible ; la largeur suit le ratio du PNG
 
@@ -288,6 +300,7 @@ class DashboardMenubar(rumps.App):
         self._notif_defer_zimbra: int = 0
         self._button_configured: bool = False
         self._update_lock: threading.Lock = threading.Lock()
+        self._last_refresh_tick_at: float = time.monotonic()
 
         # ── Événement ──────────────────────────────────
         self.event_title = rumps.MenuItem(
@@ -361,6 +374,7 @@ class DashboardMenubar(rumps.App):
 
         self._start_refresh_timer()
         self._start_update_timer()
+        self._start_watchdog()
         self._prevent_app_nap()
         rumps.events.on_wake.register(self._on_wake)
         self._run_update_once()  # premier fetch immédiat au démarrage
@@ -386,12 +400,70 @@ class DashboardMenubar(rumps.App):
 
     def _on_refresh_tick(self, _: object) -> None:
         """Callback du timer d'affichage — s'exécute sur le main thread."""
+        self._last_refresh_tick_at = time.monotonic()
         if not self._button_configured:
             self._configure_status_button()
         try:
             self.refresh_data()
         except Exception:
             pass
+
+    def _run_on_main(self, fn: Callable[[], None]) -> None:
+        """Planifie `fn` sur le main thread (AppKit / rumps)."""
+        NSOperationQueue.mainQueue().addOperationWithBlock_(fn)
+
+    def _dashboard_json_age_seconds(self) -> Optional[float]:
+        """Âge du fichier JSON en secondes, ou None si absent/inaccessible."""
+        try:
+            return time.time() - os.path.getmtime(DATA_FILE)
+        except OSError:
+            return None
+
+    def _recover_timers(self) -> None:
+        """Relance les NSTimer et rafraîchit l'UI (main thread uniquement)."""
+        self._start_refresh_timer()
+        self._start_update_timer()
+        try:
+            self.refresh_data()
+        except Exception:
+            pass
+
+    def _watchdog_tick(self) -> None:
+        """Contrôle santé timers + données (thread watchdog, pas le main thread).
+
+        Préconditions : app démarrée, watchdog actif.
+        Invariants :
+          - si le JSON est trop vieux, on lance un fetch (même si NSTimer mort) ;
+          - si le refresh timer ne tire plus, on tente recovery sur le main thread ;
+          - si la run loop reste gelée, SIGTERM + KeepAlive redémarre le process.
+        """
+        now: float = time.monotonic()
+        tick_age: float = now - self._last_refresh_tick_at
+
+        json_age: Optional[float] = self._dashboard_json_age_seconds()
+        if json_age is not None and json_age > STALE_DATA_SECONDS:
+            self._run_update_once()
+
+        if tick_age <= STALE_TICK_SECONDS:
+            return
+
+        self._run_on_main(self._recover_timers)
+
+        if tick_age > STALE_RESTART_SECONDS:
+            os.kill(os.getpid(), signal.SIGTERM)
+
+    def _start_watchdog(self) -> None:
+        """Thread watchdog indépendant de la run loop AppKit."""
+
+        def _loop() -> None:
+            while True:
+                time.sleep(WATCHDOG_INTERVAL)
+                try:
+                    self._watchdog_tick()
+                except Exception:
+                    pass
+
+        threading.Thread(target=_loop, daemon=True, name="dashboard-watchdog").start()
 
     def _start_update_timer(self) -> None:
         """(Re)démarre le timer qui déclenche la collecte gws toutes les
@@ -520,30 +592,44 @@ class DashboardMenubar(rumps.App):
 
         Délègue au même script que la collecte périodique (dashboard_update.py)
         pour une logique unique et robuste, sous le verrou partagé (pas de
-        collecte concurrente). L'affichage se rafraîchit via le timer ; on
-        notifie à la fin.
+        collecte concurrente). Rafraîchit l'UI à la fin.
         """
+        self.force_update_btn.title = "Mise à jour en cours..."
+        threading.Thread(target=self._force_update_worker, daemon=True).start()
 
-        def _run() -> None:
-            self.force_update_btn.title = "Mise à jour en cours..."
-            ok: bool = True
-            try:
-                with self._update_lock:  # attend une collecte périodique en cours
+    def _force_update_worker(self) -> None:
+        """Exécute la collecte forcée (thread de fond, pas le main thread)."""
+        ok: bool = True
+        try:
+            acquired: bool = self._update_lock.acquire(timeout=UPDATE_LOCK_TIMEOUT)
+            if not acquired:
+                ok = False
+                send_notification(
+                    "⚠️ Mise à jour bloquée",
+                    "Une collecte précédente ne répond pas (>2 min).",
+                )
+            else:
+                try:
                     os.makedirs(os.path.dirname(UPDATE_LOG), exist_ok=True)
                     with open(UPDATE_LOG, "a", encoding="utf-8") as logf:
                         subprocess.run(
                             [sys.executable, UPDATE_SCRIPT],
                             stdout=logf, stderr=logf, timeout=150,
                         )
-            except Exception as exc:
-                ok = False
-                send_notification("⚠️ Erreur mise à jour", str(exc)[:150])
-            finally:
-                self.force_update_btn.title = "Forcer la mise à jour"
-            if ok:
-                send_notification(title="✅ Dashboard mis à jour", message="")
-
-        threading.Thread(target=_run, daemon=True).start()
+                finally:
+                    self._update_lock.release()
+        except Exception as exc:
+            ok = False
+            send_notification("⚠️ Erreur mise à jour", str(exc)[:150])
+        finally:
+            self._run_on_main(
+                lambda: setattr(
+                    self.force_update_btn, "title", "Forcer la mise à jour"
+                )
+            )
+        if ok:
+            self._run_on_main(self.refresh_data)
+            send_notification(title="✅ Dashboard mis à jour", message="")
 
     # ─────────────────────────────────────────
     # Rendu / notifications
