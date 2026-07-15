@@ -18,7 +18,7 @@ import subprocess
 import sys
 
 DATA_FILE: str = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dashboard.json")
-MODEL: str = "azure/o4-mini"
+MODEL: str = "azure/gpt-5"
 MAX_BODY_CHARS: int = 3000
 MAX_SUMMARY_CHARS: int = 100
 
@@ -76,11 +76,18 @@ def _summarize_one(latest: dict) -> bool:
             print(f"OpenClaw error: {result.stderr.strip()}", file=sys.stderr)
             return False
 
-        # Strip openclaw CLI metadata lines from output
+        # Strip openclaw CLI metadata / transport log lines from output
         raw_lines: list[str] = result.stdout.strip().split("\n")
+        skip_prefixes: tuple[str, ...] = (
+            "model.run via",
+            "provider:",
+            "model:",
+            "outputs:",
+            "[provider-transport-fetch]",
+        )
         content_lines: list[str] = [
             line for line in raw_lines
-            if not line.strip().startswith(("model.run via", "provider:", "model:", "outputs:"))
+            if line.strip() and not line.strip().startswith(skip_prefixes)
         ]
         summary: str = "\n".join(content_lines).strip()
         if not summary:
