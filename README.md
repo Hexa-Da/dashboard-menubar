@@ -75,7 +75,8 @@ L'app tourne via un **seul LaunchAgent** macOS (`~/Library/LaunchAgents/`) :
 launchctl load ~/Library/LaunchAgents/com.paulantoine.dashboard-menubar.plist
 ```
 
-Les logs de collecte sont écrits dans `logs/dashboard-update.log`.
+Les logs de collecte sont écrits dans `logs/dashboard-update.log`, sans contenu
+de mail, avec rotation à 512 Kio et conservation de trois archives.
 
 ## Menu
 

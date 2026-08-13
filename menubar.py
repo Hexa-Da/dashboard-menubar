@@ -24,7 +24,7 @@ import threading
 import time
 from datetime import datetime, timedelta
 from email.utils import parseaddr
-from typing import Callable, Optional
+from typing import Callable, Optional, TextIO
 
 import rumps
 from AppKit import NSApplication, NSApplicationActivationPolicyAccessory, NSImageLeft
@@ -53,6 +53,8 @@ UPDATE_INTERVAL: int = 120  # secondes entre deux fetch gws (collecte des donné
 MAX_NOTIF_DEFER_TICKS: int = 12
 UPDATE_SCRIPT: str = os.path.join(_SCRIPT_DIR, "dashboard_update.py")
 UPDATE_LOG: str = os.path.join(_SCRIPT_DIR, "logs", "dashboard-update.log")
+UPDATE_LOG_MAX_BYTES: int = 512 * 1024
+UPDATE_LOG_BACKUP_COUNT: int = 3
 # Watchdog indépendant des NSTimer (peuvent cesser après veille / App Nap).
 WATCHDOG_INTERVAL: int = 30  # secondes entre deux contrôles
 STALE_DATA_SECONDS: int = UPDATE_INTERVAL + 60  # JSON trop vieux → fetch
@@ -81,6 +83,32 @@ def _hide_dock_icon() -> None:
     """Masque l'icône Python dans le Dock ; l'icône menubar reste visible."""
     ns_app: NSApplication = NSApplication.sharedApplication()
     ns_app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
+
+
+def _open_update_log() -> TextIO:
+    """Ouvre le journal de collecte après rotation si nécessaire."""
+    os.makedirs(os.path.dirname(UPDATE_LOG), exist_ok=True)
+    try:
+        should_rotate: bool = os.path.getsize(UPDATE_LOG) >= UPDATE_LOG_MAX_BYTES
+    except OSError:
+        should_rotate = False
+
+    if should_rotate:
+        oldest: str = f"{UPDATE_LOG}.{UPDATE_LOG_BACKUP_COUNT}"
+        try:
+            os.remove(oldest)
+        except FileNotFoundError:
+            pass
+        for index in range(UPDATE_LOG_BACKUP_COUNT - 1, 0, -1):
+            source: str = f"{UPDATE_LOG}.{index}"
+            destination: str = f"{UPDATE_LOG}.{index + 1}"
+            try:
+                os.replace(source, destination)
+            except FileNotFoundError:
+                pass
+        os.replace(UPDATE_LOG, f"{UPDATE_LOG}.1")
+
+    return open(UPDATE_LOG, "a", encoding="utf-8")
 
 
 def _open_in_browser(url: str) -> Callable[[object], None]:
@@ -495,8 +523,7 @@ class DashboardMenubar(rumps.App):
 
         def _go() -> None:
             try:
-                os.makedirs(os.path.dirname(UPDATE_LOG), exist_ok=True)
-                with open(UPDATE_LOG, "a", encoding="utf-8") as logf:
+                with _open_update_log() as logf:
                     subprocess.run(
                         [sys.executable, UPDATE_SCRIPT],
                         stdout=logf, stderr=logf, timeout=150,
@@ -610,8 +637,7 @@ class DashboardMenubar(rumps.App):
                 )
             else:
                 try:
-                    os.makedirs(os.path.dirname(UPDATE_LOG), exist_ok=True)
-                    with open(UPDATE_LOG, "a", encoding="utf-8") as logf:
+                    with _open_update_log() as logf:
                         subprocess.run(
                             [sys.executable, UPDATE_SCRIPT],
                             stdout=logf, stderr=logf, timeout=150,

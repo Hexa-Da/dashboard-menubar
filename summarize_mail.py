@@ -98,7 +98,7 @@ def _summarize_one(latest: dict) -> bool:
             summary = summary[: MAX_SUMMARY_CHARS - 1] + "…"
 
         latest["summary"] = summary
-        print(f"OK — {summary}")
+        print("OK — summary generated")
         return True
 
     except subprocess.TimeoutExpired:

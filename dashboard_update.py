@@ -273,6 +273,7 @@ def main() -> None:
         try:
             subprocess.run(
                 [sys.executable, script],
+                stdout=subprocess.DEVNULL,
                 timeout=60,
             )
         except Exception as e:
