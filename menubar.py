@@ -27,11 +27,19 @@ from email.utils import parseaddr
 from typing import Callable, Optional, TextIO
 
 import rumps
-from AppKit import NSApplication, NSApplicationActivationPolicyAccessory, NSImageLeft
+from AppKit import (
+    NSApplication,
+    NSApplicationActivationPolicyAccessory,
+    NSImageLeft,
+    NSRunningApplication,
+    NSWorkspace,
+)
 from Foundation import (
     NSActivityUserInitiatedAllowingIdleSystemSleep,
+    NSBundle,
     NSOperationQueue,
     NSProcessInfo,
+    NSURL,
 )
 
 import mac_notify
@@ -115,6 +123,24 @@ def _open_in_browser(url: str) -> Callable[[object], None]:
     """Retourne un callback rumps qui ouvre `url` dans le navigateur par défaut."""
 
     def _handler(_: object) -> None:
+        target_url = NSURL.URLWithString_(url)
+        browser_url = NSWorkspace.sharedWorkspace().URLForApplicationToOpenURL_(
+            target_url
+        )
+        browser_bundle = NSBundle.bundleWithURL_(browser_url) if browser_url else None
+        bundle_id = browser_bundle.bundleIdentifier() if browser_bundle else None
+
+        if bundle_id == "org.mozilla.firefox" and not (
+            NSRunningApplication.runningApplicationsWithBundleIdentifier_(bundle_id)
+        ):
+            executable = browser_bundle.executablePath()
+            if executable:
+                try:
+                    subprocess.Popen([executable, url], start_new_session=True)
+                    return
+                except OSError:
+                    pass
+
         subprocess.run(["open", url], check=False)
 
     return _handler
