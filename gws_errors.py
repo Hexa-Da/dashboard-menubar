@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 from typing import Optional
 
@@ -20,6 +21,52 @@ _AUTH_MARKERS: tuple[str, ...] = (
     "gws auth login",
     "gws auth refresh",
 )
+
+
+def parse_gws_auth_status_output(stdout: str) -> Optional[dict]:
+    """Extrait le premier objet JSON de la sortie de `gws auth status`.
+
+    Précondition : stdout peut contenir du bruit avant/après le JSON.
+    Retour : dict parsé, ou None si aucun objet JSON exploitable.
+    """
+    if not stdout:
+        return None
+    start: int = stdout.find("{")
+    if start < 0:
+        return None
+    try:
+        obj, _end = json.JSONDecoder().raw_decode(stdout[start:])
+    except json.JSONDecodeError:
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+def auth_status_indicates_error(payload: dict) -> bool:
+    """True si le JSON de `gws auth status` prouve un problème OAuth.
+
+    Invariant : absence de preuve (champs manquants) → False (indécis),
+    pour ne pas court-circuiter la collecte sur un statut ambigu.
+    """
+    if payload.get("token_valid") is False:
+        return True
+    # Existence credentials : seulement si gws a fourni au moins un des champs.
+    if (
+        "encrypted_credentials_exists" in payload
+        or "plain_credentials_exists" in payload
+    ):
+        has_enc: bool = bool(payload.get("encrypted_credentials_exists"))
+        has_plain: bool = bool(payload.get("plain_credentials_exists"))
+        if not has_enc and not has_plain:
+            return True
+    # OAuth sans refresh durable et sans preuve que le token access est OK.
+    if (
+        "has_refresh_token" in payload
+        and payload.get("has_refresh_token") is False
+        and not bool(payload.get("plain_credentials_exists"))
+        and payload.get("token_valid") is not True
+    ):
+        return True
+    return False
 
 
 def is_gws_auth_failure(proc: subprocess.CompletedProcess[str]) -> bool:

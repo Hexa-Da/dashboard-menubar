@@ -301,6 +301,7 @@ class DashboardMenubar(rumps.App):
         # État interne
         self._prev_unread_total: int = 0
         self._prev_event_title: Optional[str] = None
+        self._prev_gws_auth_status: Optional[str] = None
         self._gmail_cleared: bool = False
         self._last_known_unread: int = 0
         # Zimbra : mêmes mécaniques que Gmail.
@@ -878,11 +879,13 @@ class DashboardMenubar(rumps.App):
         return active_id, last_body, defer_count
 
     def _check_notifications(self, data: dict) -> None:
-        """Émet/retire les notifications mail (par id) et notifie les événements.
+        """Émet/retire les notifications mail, événement et auth gws.
 
         Invariant : au tout premier passage on AMORCE les id non lus déjà
         présents sans émettre de notification (évite un burst au démarrage) ;
         les passages suivants délèguent à `_sync_mail_notifications`.
+        Auth gws : même amorce (mémoriser sans notif), puis deliver/remove
+        sur transition uniquement (`gws-auth-current`).
         """
         gmail_ids: set[str] = {str(x) for x in data.get("unread_gmail_ids", []) if x}
         zimbra_ids: set[str] = {str(x) for x in data.get("unread_zimbra_ids", []) if x}
@@ -938,6 +941,22 @@ class DashboardMenubar(rumps.App):
             if self._prev_event_title is not None:
                 mac_notify.remove("event-current")
             self._prev_event_title = None
+
+        auth_status: str = str(data.get("gws_auth_status", "ok"))
+        if self._prev_gws_auth_status is None:
+            # Amorce : pas de notif au démarrage même si déjà auth_error.
+            self._prev_gws_auth_status = auth_status
+        elif auth_status != self._prev_gws_auth_status:
+            if auth_status == "auth_error":
+                mac_notify.deliver(
+                    "gws-auth-current",
+                    "🔑 Token Google expiré",
+                    "Exécuter : gws auth login",
+                    "Dashboard menubar",
+                )
+            elif self._prev_gws_auth_status == "auth_error":
+                mac_notify.remove("gws-auth-current")
+            self._prev_gws_auth_status = auth_status
 
 
 if __name__ == "__main__":

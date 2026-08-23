@@ -97,7 +97,7 @@ Les suffixes sont ajoutés aux lignes **Calendar**, **Gmail** et **Zimbra** :
 | Suffixe | Condition | Action suggérée |
 |---------|-----------|-----------------|
 | ⚠️ | `gmail_status` ou `zimbra_status` = `error` | Vérifier réseau, IMAP, ou logs (`dashboard_update.py` / stderr) |
-| 🔑 | `gws_auth_status` = `auth_error` | Reconnecter Google : `gws auth login` (prioritaire sur ⚠️ pour Gmail) |
+| 🔑 | `gws_auth_status` = `auth_error` | Reconnecter Google : `gws auth login` (prioritaire sur ⚠️ pour Gmail). Notif macOS une fois au passage en erreur (`gws-auth-current`) |
 
 
 ## Structure

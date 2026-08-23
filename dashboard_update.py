@@ -20,7 +20,11 @@ import sys
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from gws_errors import derive_gws_auth_status
+from gws_errors import (
+    auth_status_indicates_error,
+    derive_gws_auth_status,
+    parse_gws_auth_status_output,
+)
 from load_env import load_project_env
 from zimbra_unread import fetch_zimbra_mailbox
 
@@ -80,128 +84,162 @@ def main() -> None:
         except (OSError, json.JSONDecodeError):
             previous = {}
 
-    # ── Calendar ──
-    next_events: Optional[list] = None
-    cal_ok: bool = False
-    cal: Optional[subprocess.CompletedProcess[str]] = None
+    # ── Pré-check auth gws (avant Calendar/Gmail) ──
+    # Échec commande / parse ambigu → on laisse le flux API décider via
+    # derive_gws_auth_status (pas de faux positif auth_error).
+    auth_precheck_error: bool = False
     try:
-        cal = subprocess.run(
-            ["gws", "calendar", "events", "list",
-             "--params", json.dumps({
-                 "calendarId": "primary",
-                 "timeMin": now_utc,
-                 "timeMax": time_max,
-                 "singleEvents": True,
-                 "orderBy": "startTime",
-                 "maxResults": MAX_EVENTS,
-             })],
-            capture_output=True, text=True, timeout=30, env=env,
+        status_proc: subprocess.CompletedProcess[str] = subprocess.run(
+            ["gws", "auth", "status"],
+            capture_output=True, text=True, timeout=15, env=env,
         )
-        if cal.returncode == 0:
-            cal_ok = True
-            next_events = []
-            for ev in json.loads(cal.stdout).get("items", []):
-                next_events.append({
-                    "title": ev.get("summary", ""),
-                    "start": (ev.get("start") or {}).get("dateTime", ""),
-                    "end": (ev.get("end") or {}).get("dateTime", ""),
-                    "location": ev.get("location", ""),
-                })
+        status_payload = parse_gws_auth_status_output(status_proc.stdout or "")
+        if status_payload is not None and auth_status_indicates_error(status_payload):
+            auth_precheck_error = True
+            print("gws auth status: token/credentials invalides — skip Calendar/Gmail",
+                  file=sys.stderr)
     except Exception as e:
-        print(f"Calendar error: {e}", file=sys.stderr)
-    if next_events is None:  # appel échoué → on garde les événements précédents
-        next_events = previous.get("next_events") or []
+        print(f"gws auth status error: {e}", file=sys.stderr)
 
-    # ── Gmail : count ──
-    count_ok: bool = False
+    next_events: list = []
     unread_gmail: int = 0
-    first_msg_id: Optional[str] = None
     unread_gmail_ids: list[str] = []
-    gmail: Optional[subprocess.CompletedProcess[str]] = None
-    try:
-        gmail = subprocess.run(
-            ["gws", "gmail", "users", "messages", "list",
-             "--params", json.dumps({
-                 "userId": "me",
-                 "labelIds": ["INBOX"],
-                 "q": "is:unread",
-                 "maxResults": MAX_UNREAD,
-             })],
-            capture_output=True, text=True, timeout=30, env=env,
-        )
-        if gmail.returncode == 0:
-            count_ok = True
-            messages: list = json.loads(gmail.stdout).get("messages", [])
-            unread_gmail = len(messages)
-            unread_gmail_ids = [m.get("id") for m in messages if m.get("id")]
-            if messages:
-                first_msg_id = messages[0].get("id")
-    except Exception as e:
-        print(f"Gmail list error: {e}", file=sys.stderr)
-
-    # Invariant : gmail_status reflète la réussite du list, pas du get détail.
-    gmail_status: str = "ok" if count_ok else "error"
-
-    gws_auth_status: str = derive_gws_auth_status(
-        cal_ok=cal_ok,
-        gmail_count_ok=count_ok,
-        cal_proc=cal,
-        gmail_proc=gmail,
-        previous_status=str(previous.get("gws_auth_status", "ok")),
-    )
-
-    # ── Gmail : latest ──
     latest_unread = None
-    if not count_ok:
-        # Compte indisponible (timeout/auth) : on préserve l'état précédent
-        # en entier plutôt que d'afficher 0 mail non lu à tort.
-        # Invariant : préserver aussi unread_gmail_ids, sinon le menubar croirait
-        # que tous les mails ont disparu et retirerait toutes les notifications.
+    gmail_status: str = "error"
+    gws_auth_status: str = "ok"
+
+    if auth_precheck_error:
+        # Court-circuit Google : conserver l'état précédent, Zimbra continue.
+        gws_auth_status = "auth_error"
+        gmail_status = "error"
+        next_events = list(previous.get("next_events") or [])
         unread_gmail = int(previous.get("unread_gmail", 0))
-        latest_unread = previous.get("latest_unread")
         unread_gmail_ids = list(previous.get("unread_gmail_ids", []))
-    elif first_msg_id:
-        prev_latest: dict = previous.get("latest_unread") or {}
+        latest_unread = previous.get("latest_unread")
+    else:
+        # ── Calendar ──
+        next_events_fetched: Optional[list] = None
+        cal_ok: bool = False
+        cal: Optional[subprocess.CompletedProcess[str]] = None
         try:
-            msg: subprocess.CompletedProcess = subprocess.run(
-                ["gws", "gmail", "users", "messages", "get",
+            cal = subprocess.run(
+                ["gws", "calendar", "events", "list",
                  "--params", json.dumps({
-                     "userId": "me",
-                     "id": first_msg_id,
-                     "format": "full",
+                     "calendarId": "primary",
+                     "timeMin": now_utc,
+                     "timeMax": time_max,
+                     "singleEvents": True,
+                     "orderBy": "startTime",
+                     "maxResults": MAX_EVENTS,
                  })],
                 capture_output=True, text=True, timeout=30, env=env,
             )
-            if msg.returncode == 0:
-                msg_data: dict = json.loads(msg.stdout)
-                headers: list = msg_data.get("payload", {}).get("headers", [])
-                from_val: str = ""
-                subject_val: str = ""
-                for h in headers:
-                    name: str = h.get("name", "").lower()
-                    if name == "from":
-                        from_val = h.get("value", "")
-                    elif name == "subject":
-                        subject_val = h.get("value", "")[:80]
-                snippet: str = msg_data.get("snippet", "")
-                body: str = _extract_text_body(msg_data.get("payload", {}))
-                latest_unread = {
-                    "id": first_msg_id,
-                    "from": from_val,
-                    "subject": subject_val,
-                    "snippet": snippet,
-                    "body": body,
-                }
-                # Même mail qu'avant : on garde le résumé déjà calculé.
-                if prev_latest.get("id") == first_msg_id and prev_latest.get("summary"):
-                    latest_unread["summary"] = prev_latest["summary"]
-            elif prev_latest.get("id") == first_msg_id:
-                # get échoué mais c'est le même mail : on garde l'ancien.
-                latest_unread = prev_latest
+            if cal.returncode == 0:
+                cal_ok = True
+                next_events_fetched = []
+                for ev in json.loads(cal.stdout).get("items", []):
+                    next_events_fetched.append({
+                        "title": ev.get("summary", ""),
+                        "start": (ev.get("start") or {}).get("dateTime", ""),
+                        "end": (ev.get("end") or {}).get("dateTime", ""),
+                        "location": ev.get("location", ""),
+                    })
         except Exception as e:
-            print(f"Gmail get error: {e}", file=sys.stderr)
-            if prev_latest.get("id") == first_msg_id:
-                latest_unread = prev_latest
+            print(f"Calendar error: {e}", file=sys.stderr)
+        # appel échoué → on garde les événements précédents
+        next_events = (
+            next_events_fetched
+            if next_events_fetched is not None
+            else list(previous.get("next_events") or [])
+        )
+
+        # ── Gmail : count ──
+        count_ok: bool = False
+        first_msg_id: Optional[str] = None
+        gmail: Optional[subprocess.CompletedProcess[str]] = None
+        try:
+            gmail = subprocess.run(
+                ["gws", "gmail", "users", "messages", "list",
+                 "--params", json.dumps({
+                     "userId": "me",
+                     "labelIds": ["INBOX"],
+                     "q": "is:unread",
+                     "maxResults": MAX_UNREAD,
+                 })],
+                capture_output=True, text=True, timeout=30, env=env,
+            )
+            if gmail.returncode == 0:
+                count_ok = True
+                messages: list = json.loads(gmail.stdout).get("messages", [])
+                unread_gmail = len(messages)
+                unread_gmail_ids = [m.get("id") for m in messages if m.get("id")]
+                if messages:
+                    first_msg_id = messages[0].get("id")
+        except Exception as e:
+            print(f"Gmail list error: {e}", file=sys.stderr)
+
+        # Invariant : gmail_status reflète la réussite du list, pas du get détail.
+        gmail_status = "ok" if count_ok else "error"
+
+        gws_auth_status = derive_gws_auth_status(
+            cal_ok=cal_ok,
+            gmail_count_ok=count_ok,
+            cal_proc=cal,
+            gmail_proc=gmail,
+            previous_status=str(previous.get("gws_auth_status", "ok")),
+        )
+
+        # ── Gmail : latest ──
+        if not count_ok:
+            # Compte indisponible (timeout/auth) : on préserve l'état précédent
+            # en entier plutôt que d'afficher 0 mail non lu à tort.
+            # Invariant : préserver aussi unread_gmail_ids, sinon le menubar croirait
+            # que tous les mails ont disparu et retirerait toutes les notifications.
+            unread_gmail = int(previous.get("unread_gmail", 0))
+            latest_unread = previous.get("latest_unread")
+            unread_gmail_ids = list(previous.get("unread_gmail_ids", []))
+        elif first_msg_id:
+            prev_latest: dict = previous.get("latest_unread") or {}
+            try:
+                msg: subprocess.CompletedProcess = subprocess.run(
+                    ["gws", "gmail", "users", "messages", "get",
+                     "--params", json.dumps({
+                         "userId": "me",
+                         "id": first_msg_id,
+                         "format": "full",
+                     })],
+                    capture_output=True, text=True, timeout=30, env=env,
+                )
+                if msg.returncode == 0:
+                    msg_data: dict = json.loads(msg.stdout)
+                    headers: list = msg_data.get("payload", {}).get("headers", [])
+                    from_val: str = ""
+                    subject_val: str = ""
+                    for h in headers:
+                        name: str = h.get("name", "").lower()
+                        if name == "from":
+                            from_val = h.get("value", "")
+                        elif name == "subject":
+                            subject_val = h.get("value", "")[:80]
+                    snippet: str = msg_data.get("snippet", "")
+                    body: str = _extract_text_body(msg_data.get("payload", {}))
+                    latest_unread = {
+                        "id": first_msg_id,
+                        "from": from_val,
+                        "subject": subject_val,
+                        "snippet": snippet,
+                        "body": body,
+                    }
+                    # Même mail qu'avant : on garde le résumé déjà calculé.
+                    if prev_latest.get("id") == first_msg_id and prev_latest.get("summary"):
+                        latest_unread["summary"] = prev_latest["summary"]
+                elif prev_latest.get("id") == first_msg_id:
+                    # get échoué mais c'est le même mail : on garde l'ancien.
+                    latest_unread = prev_latest
+            except Exception as e:
+                print(f"Gmail get error: {e}", file=sys.stderr)
+                if prev_latest.get("id") == first_msg_id:
+                    latest_unread = prev_latest
 
     # ── Zimbra (IMAP) ──
     # Même philosophie que Gmail : en cas d'échec (login, réseau, IMAP off),
