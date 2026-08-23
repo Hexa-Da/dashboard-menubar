@@ -73,12 +73,11 @@ def is_gws_auth_failure(proc: subprocess.CompletedProcess[str]) -> bool:
     """True si la sortie gws indique un problème d'authentification OAuth.
 
     Précondition : proc issu d'un appel gws terminé (returncode peut être ≠ 0).
+    Invariant : exiger un marqueur OAuth dans stdout/stderr — le code 2 seul
+    ne suffit pas (hors ligne / erreur API peut aussi sortir non-zéro).
     """
     if proc.returncode == 0:
         return False
-    # gws documente le code 2 pour les erreurs d'auth.
-    if proc.returncode == 2:
-        return True
     combined: str = (proc.stderr or "") + (proc.stdout or "")
     lower: str = combined.lower()
     return any(marker in lower for marker in _AUTH_MARKERS)

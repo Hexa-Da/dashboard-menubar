@@ -681,12 +681,15 @@ class DashboardMenubar(rumps.App):
 
     def _update_menu(self, data: dict) -> None:
         """Met à jour les libellés des MenuItems depuis `data`."""
-        # ── Événement ─────────────────────────────────
-        gws_auth_error: bool = data.get("gws_auth_status") == "auth_error"
+        # Priorité d'affichage : offline > auth_error > error source.
+        offline: bool = data.get("connectivity") == "offline"
+        gws_auth_error: bool = (not offline) and data.get("gws_auth_status") == "auth_error"
         event: Optional[dict] = _extract_event(data)
         if event is None:
             cal_title: str = "📅 Aucun événement à venir"
-            if gws_auth_error:
+            if offline:
+                cal_title += " ✈️"
+            elif gws_auth_error:
                 cal_title += " 🔑"
             self.event_title.title = cal_title
             if gws_auth_error:
@@ -697,7 +700,9 @@ class DashboardMenubar(rumps.App):
         else:
             title: str = str(event.get("title", "Événement sans titre"))
             cal_title = f"📅 {title}"
-            if gws_auth_error:
+            if offline:
+                cal_title += " ✈️"
+            elif gws_auth_error:
                 cal_title += " 🔑"
             self.event_title.title = cal_title
 
@@ -726,8 +731,9 @@ class DashboardMenubar(rumps.App):
         gmail_title: str = (
             f"✉️ Gmail : {gmail_shown} non lu{'s' if gmail_shown > 1 else ''}"
         )
-        # Auth gws (token révoqué) prioritaire sur l'avertissement réseau générique.
-        if gws_auth_error:
+        if offline:
+            gmail_title += " ✈️"
+        elif gws_auth_error:
             gmail_title += " 🔑"
         elif data.get("gmail_status") == "error":
             gmail_title += " ⚠️"
@@ -761,7 +767,9 @@ class DashboardMenubar(rumps.App):
         zimbra_title: str = (
             f"✉️ Zimbra : {zimbra_shown} non lu{'s' if zimbra_shown > 1 else ''}"
         )
-        if data.get("zimbra_status") == "error":
+        if offline:
+            zimbra_title += " ✈️"
+        elif data.get("zimbra_status") == "error":
             zimbra_title += " ⚠️"
         self.mail_zimbra.title = zimbra_title
 
@@ -943,8 +951,13 @@ class DashboardMenubar(rumps.App):
             self._prev_event_title = None
 
         auth_status: str = str(data.get("gws_auth_status", "ok"))
+        offline: bool = data.get("connectivity") == "offline"
         if self._prev_gws_auth_status is None:
             # Amorce : pas de notif au démarrage même si déjà auth_error.
+            self._prev_gws_auth_status = auth_status
+        elif offline:
+            # Hors ligne : pas de notif auth (défense en profondeur).
+            # On mémorise quand même le statut pour éviter un burst au retour.
             self._prev_gws_auth_status = auth_status
         elif auth_status != self._prev_gws_auth_status:
             if auth_status == "auth_error":

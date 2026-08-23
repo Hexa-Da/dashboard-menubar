@@ -96,8 +96,11 @@ de mail, avec rotation à 512 Kio et conservation de trois archives.
 Les suffixes sont ajoutés aux lignes **Calendar**, **Gmail** et **Zimbra** :
 | Suffixe | Condition | Action suggérée |
 |---------|-----------|-----------------|
-| ⚠️ | `gmail_status` ou `zimbra_status` = `error` | Vérifier réseau, IMAP, ou logs (`dashboard_update.py` / stderr) |
-| 🔑 | `gws_auth_status` = `auth_error` | Reconnecter Google : `gws auth login` (prioritaire sur ⚠️ pour Gmail). Notif macOS une fois au passage en erreur (`gws-auth-current`) |
+| ✈️ | `connectivity` = `offline` | Réseau indisponible (toutes les sources actives en échec). Prioritaire sur ⚠️/🔑 |
+| ⚠️ | `gmail_status` ou `zimbra_status` = `error` (et online) | Vérifier IMAP, API, ou logs (`dashboard_update.py` / stderr) |
+| 🔑 | `gws_auth_status` = `auth_error` (et online) | Reconnecter Google : `gws auth login`. Notif macOS une fois au passage en erreur (`gws-auth-current`) |
+
+`connectivity` est dérivé automatiquement à chaque collecte : `offline` si Gmail (et Zimbra si configuré) échouent sans preuve OAuth ; sinon `online`.
 
 
 ## Structure

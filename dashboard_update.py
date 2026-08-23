@@ -67,6 +67,28 @@ def _write_json_atomic(path: str, data: dict) -> None:
     os.replace(tmp, path)
 
 
+def _derive_connectivity(
+    *,
+    auth_precheck_error: bool,
+    gmail_status: str,
+    zimbra_status: str,
+    gws_auth_status: str,
+) -> str:
+    """Dérive connectivity online/offline pour dashboard.json.
+
+    offline = chaque source active a échoué ET aucune preuve OAuth.
+    Sources actives : Gmail toujours ; Zimbra si configuré (pas disabled).
+    auth_error (pré-check ou marqueurs) → online (vrai diagnostic auth).
+    """
+    if auth_precheck_error or gws_auth_status == "auth_error":
+        return "online"
+    gmail_failed: bool = gmail_status == "error"
+    zimbra_active: bool = zimbra_status != "disabled"
+    zimbra_failed: bool = zimbra_status == "error"
+    all_failed: bool = gmail_failed and (not zimbra_active or zimbra_failed)
+    return "offline" if all_failed else "online"
+
+
 def main() -> None:
     env: dict = _gws_env()
     now: datetime = datetime.now(timezone.utc)
@@ -279,6 +301,20 @@ def main() -> None:
             zimbra_status = "error"
             # fallback : valeurs précédentes déjà en place.
 
+    # ── Connectivity (online / offline) ──
+    # Hors ligne = toutes les sources actives en échec sans preuve OAuth.
+    # Dans ce cas on ne laisse pas gws_auth_status passer (ou rester promu)
+    # à auth_error à cause du réseau — on conserve ok / précédent non-auth.
+    connectivity: str = _derive_connectivity(
+        auth_precheck_error=auth_precheck_error,
+        gmail_status=gmail_status,
+        zimbra_status=zimbra_status,
+        gws_auth_status=gws_auth_status,
+    )
+    if connectivity == "offline":
+        # Coupure réseau ≠ OAuth : ne jamais écrire auth_error.
+        gws_auth_status = "ok"
+
     # ── Write JSON ──
     dashboard: dict = {
         "next_events": next_events,
@@ -286,6 +322,7 @@ def main() -> None:
         "unread_gmail_ids": unread_gmail_ids,
         "gmail_status": gmail_status,
         "gws_auth_status": gws_auth_status,
+        "connectivity": connectivity,
         "latest_unread": latest_unread,
         "unread_zimbra": unread_zimbra,
         "unread_zimbra_ids": unread_zimbra_ids,
@@ -296,7 +333,7 @@ def main() -> None:
     _write_json_atomic(DATA_FILE, dashboard)
 
     print(f"OK — {len(next_events)} events, {unread_gmail} gmail, "
-          f"{unread_zimbra} zimbra, {now_local}")
+          f"{unread_zimbra} zimbra, {connectivity}, {now_local}")
 
     # ── Summarize latest mail via OpenClaw (Gmail + Zimbra) ──
     # On lance summarize_mail.py si l'un des deux derniers mails a un corps
