@@ -2,10 +2,12 @@
 """
 Mac Notify — Notifications macOS natives et supprimables
 
-Émet des notifications via `NSUserNotificationCenter` (PyObjC) plutôt que via
-`osascript display notification`. L'intérêt : chaque notification porte un
+Canal unique du menubar pour toutes les notifications (mails, prochain
+événement, feedback « Forcer la mise à jour », et futurs cas sticky).
+
+Émet via `NSUserNotificationCenter` (PyObjC). Chaque notification porte un
 `identifier` unique, ce qui permet de la RETIRER plus tard (au clic « marquer
-comme lu » ou quand le mail correspondant disparaît des données).
+comme lu », disparition du mail, ou fin d'un état sticky).
 
 Contrainte connue : `NSUserNotificationCenter` est déprécié depuis macOS 11
 mais reste fonctionnel et ne nécessite pas d'autorisation explicite, contrairement
@@ -14,6 +16,7 @@ via `python menubar.py` n'a pas de bundle ; on injecte donc un `CFBundleIdentifi
 au runtime pour que le centre de notifications soit disponible.
 
 Prérequis : `pip install pyobjc-framework-Cocoa`.
+Précondition d'appel : main thread uniquement (le centre n'est pas thread-safe).
 """
 
 from typing import Optional

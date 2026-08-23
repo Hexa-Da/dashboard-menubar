@@ -146,37 +146,6 @@ def _open_in_browser(url: str) -> Callable[[object], None]:
     return _handler
 
 
-def _run_detached(cmd: list[str]) -> None:
-    """Lance une commande en thread détaché, avec timeout.
-
-    CRITIQUE : les notifs partent depuis le thread principal (timer rumps).
-    Un `subprocess.run` synchrone qui bloque y gèlerait toute la run loop
-    (et donc tout le rafraîchissement). On l'isole donc systématiquement.
-    """
-    def _go() -> None:
-        try:
-            subprocess.run(cmd, capture_output=True, timeout=15)
-        except Exception:
-            pass
-
-    threading.Thread(target=_go, daemon=True).start()
-
-
-def _osa_escape(text: str) -> str:
-    """Échappe une chaîne pour l'insérer dans un littéral AppleScript."""
-    return text.replace("\\", "\\\\").replace('"', '\\"')
-
-
-def send_notification(title: str, message: str, subtitle: str = "") -> None:
-    """Envoie une notification macOS via osascript, en thread détaché
-    (jamais bloquant pour la run loop)."""
-    script: str = (
-        f'display notification "{_osa_escape(message)}" '
-        f'with title "{_osa_escape(title)}" subtitle "{_osa_escape(subtitle)}"'
-    )
-    _run_detached(["osascript", "-e", script])
-
-
 def _parse_local_datetime(iso_str: str) -> datetime:
     """ISO 8601 → datetime naïf en heure locale (évite aware/naïf mixés)."""
     dt: datetime = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
@@ -651,16 +620,17 @@ class DashboardMenubar(rumps.App):
         threading.Thread(target=self._force_update_worker, daemon=True).start()
 
     def _force_update_worker(self) -> None:
-        """Exécute la collecte forcée (thread de fond, pas le main thread)."""
-        ok: bool = True
+        """Exécute la collecte forcée (thread de fond, pas le main thread).
+
+        Invariant : aucun appel mac_notify ici — le worker calcule un statut,
+        puis un seul `_finish` sur le main thread fait bouton + notif + refresh.
+        """
+        status: str = "ok"  # "ok" | "blocked" | "error"
+        err_msg: str = ""
         try:
             acquired: bool = self._update_lock.acquire(timeout=UPDATE_LOCK_TIMEOUT)
             if not acquired:
-                ok = False
-                send_notification(
-                    "⚠️ Mise à jour bloquée",
-                    "Une collecte précédente ne répond pas (>2 min).",
-                )
+                status = "blocked"
             else:
                 try:
                     with _open_update_log() as logf:
@@ -671,17 +641,32 @@ class DashboardMenubar(rumps.App):
                 finally:
                     self._update_lock.release()
         except Exception as exc:
-            ok = False
-            send_notification("⚠️ Erreur mise à jour", str(exc)[:150])
-        finally:
-            self._run_on_main(
-                lambda: setattr(
-                    self.force_update_btn, "title", "Forcer la mise à jour"
+            status = "error"
+            err_msg = str(exc)[:150]
+
+        def _finish() -> None:
+            self.force_update_btn.title = "Forcer la mise à jour"
+            if status == "blocked":
+                mac_notify.deliver(
+                    "update-status",
+                    "⚠️ Mise à jour bloquée",
+                    "Une collecte précédente ne répond pas (>2 min).",
                 )
-            )
-        if ok:
-            self._run_on_main(self.refresh_data)
-            send_notification(title="✅ Dashboard mis à jour", message="")
+            elif status == "error":
+                mac_notify.deliver(
+                    "update-status",
+                    "⚠️ Erreur mise à jour",
+                    err_msg,
+                )
+            else:
+                mac_notify.deliver(
+                    "update-status",
+                    "✅ Dashboard mis à jour",
+                    "",
+                )
+                self.refresh_data()
+
+        self._run_on_main(_finish)
 
     # ─────────────────────────────────────────
     # Rendu / notifications
@@ -942,13 +927,16 @@ class DashboardMenubar(rumps.App):
             if title != self._prev_event_title and self._prev_event_title is not None:
                 start: str = str(event.get("start", ""))
                 end: str = str(event.get("end", ""))
-                send_notification(
-                    title="📅 Prochain événement",
-                    message=title,
-                    subtitle=format_event_time(start, end) if start else "",
+                mac_notify.deliver(
+                    "event-current",
+                    "📅 Prochain événement",
+                    title,
+                    format_event_time(start, end) if start else "",
                 )
             self._prev_event_title = title
         else:
+            if self._prev_event_title is not None:
+                mac_notify.remove("event-current")
             self._prev_event_title = None
 
 
