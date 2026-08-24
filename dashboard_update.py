@@ -161,6 +161,7 @@ def main() -> None:
                 next_events_fetched = []
                 for ev in json.loads(cal.stdout).get("items", []):
                     next_events_fetched.append({
+                        "id": ev.get("id", ""),
                         "title": ev.get("summary", ""),
                         "start": (ev.get("start") or {}).get("dateTime", ""),
                         "end": (ev.get("end") or {}).get("dateTime", ""),

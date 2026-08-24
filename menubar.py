@@ -300,7 +300,7 @@ class DashboardMenubar(rumps.App):
 
         # État interne
         self._prev_unread_total: int = 0
-        self._prev_event_title: Optional[str] = None
+        self._prev_event_key: Optional[tuple[str, str, str, str]] = None
         self._prev_gws_auth_status: Optional[str] = None
         self._gmail_cleared: bool = False
         self._last_known_unread: int = 0
@@ -935,20 +935,31 @@ class DashboardMenubar(rumps.App):
         event: Optional[dict] = _extract_event(data)
         if event is not None:
             title: str = str(event.get("title", ""))
-            if title != self._prev_event_title and self._prev_event_title is not None:
-                start: str = str(event.get("start", ""))
-                end: str = str(event.get("end", ""))
+            start: str = str(event.get("start", ""))
+            end: str = str(event.get("end", ""))
+            event_id: str = str(event.get("id", "")).strip()
+            event_key: tuple[str, str, str, str] = (event_id, title, start, end)
+            same_event: bool = (
+                self._prev_event_key is not None
+                and (
+                    event_id == self._prev_event_key[0]
+                    if event_id and self._prev_event_key[0]
+                    else event_key[1:] == self._prev_event_key[1:]
+                )
+            )
+            if not same_event and self._prev_event_key is not None:
+                mac_notify.remove("event-current")
                 mac_notify.deliver(
                     "event-current",
                     "📅 Prochain événement",
                     title,
                     format_event_time(start, end) if start else "",
                 )
-            self._prev_event_title = title
+            self._prev_event_key = event_key
         else:
-            if self._prev_event_title is not None:
+            if self._prev_event_key is not None:
                 mac_notify.remove("event-current")
-            self._prev_event_title = None
+            self._prev_event_key = None
 
         auth_status: str = str(data.get("gws_auth_status", "ok"))
         offline: bool = data.get("connectivity") == "offline"
