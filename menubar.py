@@ -299,15 +299,17 @@ class DashboardMenubar(rumps.App):
             self._icon_nsimage.setSize_((width, ICON_MENUBAR_HEIGHT))
 
         # État interne
-        self._prev_unread_total: int = 0
         self._prev_event_key: Optional[tuple[str, str, str, str]] = None
         self._prev_gws_auth_status: Optional[str] = None
         self._gmail_cleared: bool = False
         self._last_known_unread: int = 0
+        self._last_known_gmail_ids: set[str] = set()
+        self._cleared_gmail_ids: set[str] = set()
         # Zimbra : mêmes mécaniques que Gmail.
-        self._prev_unread_zimbra: int = 0
         self._zimbra_cleared: bool = False
         self._last_known_unread_zimbra: int = 0
+        self._last_known_zimbra_ids: set[str] = set()
+        self._cleared_zimbra_ids: set[str] = set()
 
         # Notifications natives par source (cf. mac_notify) :
         #  Une seule notification par source (gmail-current / zimbra-current) pour
@@ -575,11 +577,11 @@ class DashboardMenubar(rumps.App):
     def clear_gmail_local(self, _: object) -> None:
         """Marque les mails comme « lus » côté interface seulement.
 
-        Effets : flag `_gmail_cleared` activé + seuil mémorisé. Tant qu'aucun
-        nouveau mail (au-delà du seuil) n'arrive, l'UI affiche 0.
+        Effets : flag `_gmail_cleared` + snapshot des ids non lus. Tant qu'aucun
+        nouvel id non lu n'apparaît, l'UI affiche 0.
         """
         self._gmail_cleared = True
-        self._prev_unread_total = self._last_known_unread
+        self._cleared_gmail_ids = set(self._last_known_gmail_ids)
         # Retire la bannière affichée SANS vider `_seen_gmail_ids` : les mails
         # restent non lus côté serveur, on ne veut donc pas les re-notifier au
         # prochain refresh.
@@ -595,11 +597,11 @@ class DashboardMenubar(rumps.App):
     def clear_zimbra_local(self, _: object) -> None:
         """Marque les mails Zimbra comme « lus » côté interface seulement.
 
-        Symétrique de clear_gmail_local : flag + seuil mémorisé. IMAP reste
+        Symétrique de clear_gmail_local : flag + snapshot d'ids. IMAP reste
         en readonly, donc rien n'est modifié côté serveur.
         """
         self._zimbra_cleared = True
-        self._prev_unread_zimbra = self._last_known_unread_zimbra
+        self._cleared_zimbra_ids = set(self._last_known_zimbra_ids)
         # Symétrique de clear_gmail_local : retire la bannière, garde `_seen`.
         if self._active_zimbra_id:
             mac_notify.remove("zimbra-current")
@@ -720,12 +722,15 @@ class DashboardMenubar(rumps.App):
 
         # ── Gmail ─────────────────────────────────────
         gmail_raw: int = int(data.get("unread_gmail", 0))
-        # Un nouveau mail (compteur en hausse vs la lecture précédente) annule
-        # le « marqué comme lu » manuel — même si le total était repassé bas
-        # entre-temps (mails lus puis nouveau mail).
-        if self._gmail_cleared and gmail_raw > self._last_known_unread:
+        gmail_ids: set[str] = {
+            str(x) for x in data.get("unread_gmail_ids", []) if x
+        }
+        # Un nouvel id non lu (absent du snapshot au clear) annule le
+        # « marqué comme lu » manuel — même si le compteur reste à 1.
+        if self._gmail_cleared and (gmail_ids - self._cleared_gmail_ids):
             self._gmail_cleared = False
         self._last_known_unread = gmail_raw
+        self._last_known_gmail_ids = gmail_ids
         gmail_shown: int = 0 if self._gmail_cleared else gmail_raw
 
         gmail_title: str = (
@@ -759,9 +764,13 @@ class DashboardMenubar(rumps.App):
 
         # ── Zimbra ────────────────────────────────────
         zimbra_raw: int = int(data.get("unread_zimbra", 0))
-        if self._zimbra_cleared and zimbra_raw > self._last_known_unread_zimbra:
+        zimbra_ids: set[str] = {
+            str(x) for x in data.get("unread_zimbra_ids", []) if x
+        }
+        if self._zimbra_cleared and (zimbra_ids - self._cleared_zimbra_ids):
             self._zimbra_cleared = False
         self._last_known_unread_zimbra = zimbra_raw
+        self._last_known_zimbra_ids = zimbra_ids
         zimbra_shown: int = 0 if self._zimbra_cleared else zimbra_raw
 
         zimbra_title: str = (
