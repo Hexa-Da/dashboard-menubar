@@ -235,11 +235,11 @@ def _mail_notification_content(
 def _extract_event(data: dict) -> Optional[dict]:
     """Renvoie le prochain événement pertinent (ou None).
 
-    Ignore un événement dont la fin est dans moins de 30 minutes.
+    Ignore un événement dont la fin est dans moins de 15 minutes.
     Accepte `next_events` (liste) et `next_event` (objet legacy).
     """
     now: datetime = datetime.now()
-    cutoff: timedelta = timedelta(minutes=30)
+    cutoff: timedelta = timedelta(minutes=15)
 
     candidates: list[dict] = []
     events: object = data.get("next_events")
