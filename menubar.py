@@ -55,6 +55,8 @@ _SCRIPT_DIR: str = os.path.dirname(os.path.abspath(__file__))
 DATA_FILE: str = os.path.join(_SCRIPT_DIR, "dashboard.json")
 REFRESH_INTERVAL: int = 10  # secondes entre deux relectures du JSON
 UPDATE_INTERVAL: int = 120  # secondes entre deux fetch gws (collecte des données)
+# Rappel notif auth si gws_auth_status reste en erreur (amorce / redémarrage).
+AUTH_REMIND_INTERVAL: int = 30 * 60
 # Nb max de ticks de refresh pendant lesquels on diffère une notif mail en
 # attendant le résumé OpenClaw. Garde-fou : au-delà, on notifie quand même
 # (si OpenClaw échoue, ne jamais notifier serait pire). ~2 min à 10 s/tick.
@@ -400,6 +402,7 @@ class DashboardMenubar(rumps.App):
 
         self._start_refresh_timer()
         self._start_update_timer()
+        self._start_auth_remind_timer()
         self._start_watchdog()
         self._prevent_app_nap()
         rumps.events.on_wake.register(self._on_wake)
@@ -449,6 +452,7 @@ class DashboardMenubar(rumps.App):
         """Relance les NSTimer et rafraîchit l'UI (main thread uniquement)."""
         self._start_refresh_timer()
         self._start_update_timer()
+        self._start_auth_remind_timer()
         try:
             self.refresh_data()
         except Exception:
@@ -510,6 +514,42 @@ class DashboardMenubar(rumps.App):
         """Tick du timer d'update (main thread) → lance un fetch en fond."""
         self._run_update_once()
 
+    def _start_auth_remind_timer(self) -> None:
+        """(Re)démarre le timer de rappel notif auth (toutes les
+        AUTH_REMIND_INTERVAL secondes). Idempotent (cf. _on_wake)."""
+        existing = getattr(self, "_auth_remind_timer", None)
+        if existing is not None:
+            try:
+                existing.stop()
+            except Exception:
+                pass
+        self._auth_remind_timer = rumps.Timer(
+            self._on_auth_remind_tick, AUTH_REMIND_INTERVAL
+        )
+        self._auth_remind_timer.start()
+
+    def _on_auth_remind_tick(self, _: object) -> None:
+        """Si auth encore en erreur et online → re-pousse gws-auth-current."""
+        try:
+            data: dict = load_data()
+        except Exception:
+            return
+        if data.get("connectivity") == "offline":
+            return
+        if data.get("gws_auth_status") != "auth_error":
+            return
+        self._deliver_gws_auth_notif()
+
+    @staticmethod
+    def _deliver_gws_auth_notif() -> None:
+        """Notif sticky « token Google expiré » (transition ou rappel 30 min)."""
+        mac_notify.deliver(
+            "gws-auth-current",
+            "🔑 Token Google expiré",
+            "Exécuter : gws auth login",
+            "Dashboard menubar",
+        )
+
     def _run_update_once(self) -> None:
         """Exécute dashboard_update.py en arrière-plan, un seul à la fois.
 
@@ -542,6 +582,7 @@ class DashboardMenubar(rumps.App):
         fréquents « Maintenance Sleep »."""
         self._start_refresh_timer()
         self._start_update_timer()
+        self._start_auth_remind_timer()
         self._on_refresh_tick(None)
         self._run_update_once()
 
@@ -902,7 +943,8 @@ class DashboardMenubar(rumps.App):
         présents sans émettre de notification (évite un burst au démarrage) ;
         les passages suivants délèguent à `_sync_mail_notifications`.
         Auth gws : même amorce (mémoriser sans notif), puis deliver/remove
-        sur transition uniquement (`gws-auth-current`).
+        sur transition (`gws-auth-current`) ; un timer rappel toutes les
+        AUTH_REMIND_INTERVAL s si l'erreur persiste (online).
         """
         gmail_ids: set[str] = {str(x) for x in data.get("unread_gmail_ids", []) if x}
         zimbra_ids: set[str] = {str(x) for x in data.get("unread_zimbra_ids", []) if x}
@@ -981,16 +1023,10 @@ class DashboardMenubar(rumps.App):
             self._prev_gws_auth_status = auth_status
         elif auth_status != self._prev_gws_auth_status:
             if auth_status == "auth_error":
-                mac_notify.deliver(
-                    "gws-auth-current",
-                    "🔑 Token Google expiré",
-                    "Exécuter : gws auth login",
-                    "Dashboard menubar",
-                )
+                self._deliver_gws_auth_notif()
             elif self._prev_gws_auth_status == "auth_error":
                 mac_notify.remove("gws-auth-current")
             self._prev_gws_auth_status = auth_status
-
 
 if __name__ == "__main__":
     _hide_dock_icon()
