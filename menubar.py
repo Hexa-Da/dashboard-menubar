@@ -58,6 +58,7 @@ UPDATE_INTERVAL: int = 120  # secondes entre deux fetch gws (collecte des donné
 # Rappel notif auth si gws_auth_status reste en erreur (amorce / redémarrage).
 # Horloge monotonic dans _check_notifications (pas de NSTimer dédié).
 AUTH_REMIND_INTERVAL: int = 30 * 60
+AUTH_NOTIF_PREFIX: str = "gws-auth-"
 # Nb max de ticks de refresh pendant lesquels on diffère une notif mail en
 # attendant le résumé OpenClaw. Garde-fou : au-delà, on notifie quand même
 # (si OpenClaw échoue, ne jamais notifier serait pire). ~2 min à 10 s/tick.
@@ -519,15 +520,18 @@ class DashboardMenubar(rumps.App):
     def _deliver_gws_auth_notif(self) -> None:
         """Notif sticky « token Google expiré » (transition ou rappel 30 min).
 
-        remove puis deliver : même identifier + même texte ne re-alerte pas
-        toujours sous NSUserNotification si la notif est déjà délivrée.
+        Id horodaté + son : même identifier + même texte ne re-affiche
+        souvent pas de bannière sous NSUserNotification (notifs livrées
+        silencieusement au Centre uniquement).
         """
-        mac_notify.remove("gws-auth-current")
+        mac_notify.remove_prefix(AUTH_NOTIF_PREFIX)
+        stamp: str = time.strftime("%H:%M")
         mac_notify.deliver(
-            "gws-auth-current",
+            f"{AUTH_NOTIF_PREFIX}{int(time.time())}",
             "🔑 Token Google expiré",
             "Exécuter : gws auth login",
-            "Dashboard menubar",
+            f"Dashboard menubar · {stamp}",
+            sound=True,
         )
         self._auth_remind_anchor = time.monotonic()
 
@@ -923,8 +927,9 @@ class DashboardMenubar(rumps.App):
         présents sans émettre de notification (évite un burst au démarrage) ;
         les passages suivants délèguent à `_sync_mail_notifications`.
         Auth gws : même amorce (mémoriser sans notif), puis deliver/remove
-        sur transition (`gws-auth-current`) ; rappel via ancre monotonic
-        toutes les AUTH_REMIND_INTERVAL s si l'erreur persiste (online).
+        sur transition ; rappel via ancre monotonic toutes les
+        AUTH_REMIND_INTERVAL s si l'erreur persiste (online). Ids
+        `gws-auth-<epoch>` + son pour forcer une alerte visible.
         """
         gmail_ids: set[str] = {str(x) for x in data.get("unread_gmail_ids", []) if x}
         zimbra_ids: set[str] = {str(x) for x in data.get("unread_zimbra_ids", []) if x}
@@ -1007,7 +1012,7 @@ class DashboardMenubar(rumps.App):
             if auth_status == "auth_error":
                 self._deliver_gws_auth_notif()
             elif self._prev_gws_auth_status == "auth_error":
-                mac_notify.remove("gws-auth-current")
+                mac_notify.remove_prefix(AUTH_NOTIF_PREFIX)
                 self._auth_remind_anchor = None
             self._prev_gws_auth_status = auth_status
         elif (

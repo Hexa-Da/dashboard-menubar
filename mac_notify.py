@@ -57,11 +57,20 @@ def _center() -> Optional[NSUserNotificationCenter]:
     return NSUserNotificationCenter.defaultUserNotificationCenter()
 
 
-def deliver(identifier: str, title: str, message: str, subtitle: str = "") -> bool:
+def deliver(
+    identifier: str,
+    title: str,
+    message: str,
+    subtitle: str = "",
+    *,
+    sound: bool = False,
+) -> bool:
     """Affiche une notification portant `identifier` (unique, pour suppression).
 
     Préconditions : `identifier` et `title` non vides ; à appeler depuis le
     main thread (le centre de notifications n'est pas thread-safe).
+    `sound` : joue le son système par défaut (aide à attirer l'attention quand
+    macOS livre la notif au Centre sans bannière).
     Retour : True si remise au centre, False si le centre est indisponible
     (process sans bundle utilisable, p. ex.).
     """
@@ -74,6 +83,9 @@ def deliver(identifier: str, title: str, message: str, subtitle: str = "") -> bo
     if subtitle:
         notif.setSubtitle_(subtitle)
     notif.setInformativeText_(message)
+    if sound:
+        # Constante Cocoa ; string acceptée aussi par setSoundName_.
+        notif.setSoundName_("NSUserNotificationDefaultSoundName")
     center.deliverNotification_(notif)
     return True
 
@@ -95,6 +107,26 @@ def remove(identifier: str) -> None:
         return
     for notif in delivered:
         if notif.identifier() == identifier:
+            center.removeDeliveredNotification_(notif)
+
+
+def remove_prefix(prefix: str) -> None:
+    """Retire toutes les notifications dont l'identifier commence par `prefix`.
+
+    Précondition : à appeler depuis le main thread. Utile pour les rappels
+    auth qui utilisent un id horodaté (`gws-auth-<epoch>`).
+    """
+    if not prefix:
+        return
+    center: Optional[NSUserNotificationCenter] = _center()
+    if center is None:
+        return
+    delivered: Optional[list] = center.deliveredNotifications()
+    if not delivered:
+        return
+    for notif in delivered:
+        ident = notif.identifier()
+        if ident and ident.startswith(prefix):
             center.removeDeliveredNotification_(notif)
 
 
