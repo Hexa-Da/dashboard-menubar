@@ -56,6 +56,7 @@ DATA_FILE: str = os.path.join(_SCRIPT_DIR, "dashboard.json")
 REFRESH_INTERVAL: int = 10  # secondes entre deux relectures du JSON
 UPDATE_INTERVAL: int = 120  # secondes entre deux fetch gws (collecte des données)
 # Rappel notif auth si gws_auth_status reste en erreur (amorce / redémarrage).
+# Horloge monotonic dans _check_notifications (pas de NSTimer dédié).
 AUTH_REMIND_INTERVAL: int = 30 * 60
 # Nb max de ticks de refresh pendant lesquels on diffère une notif mail en
 # attendant le résumé OpenClaw. Garde-fou : au-delà, on notifie quand même
@@ -303,6 +304,9 @@ class DashboardMenubar(rumps.App):
         # État interne
         self._prev_event_key: Optional[tuple[str, str, str, str]] = None
         self._prev_gws_auth_status: Optional[str] = None
+        # Ancre monotonic du dernier rappel auth (amorce ou deliver) ;
+        # None = pas encore amorcé. Immune aux reset NSTimer wake/recover.
+        self._auth_remind_anchor: Optional[float] = None
         self._gmail_cleared: bool = False
         self._last_known_unread: int = 0
         self._last_known_gmail_ids: set[str] = set()
@@ -402,7 +406,6 @@ class DashboardMenubar(rumps.App):
 
         self._start_refresh_timer()
         self._start_update_timer()
-        self._start_auth_remind_timer()
         self._start_watchdog()
         self._prevent_app_nap()
         rumps.events.on_wake.register(self._on_wake)
@@ -452,7 +455,6 @@ class DashboardMenubar(rumps.App):
         """Relance les NSTimer et rafraîchit l'UI (main thread uniquement)."""
         self._start_refresh_timer()
         self._start_update_timer()
-        self._start_auth_remind_timer()
         try:
             self.refresh_data()
         except Exception:
@@ -514,41 +516,20 @@ class DashboardMenubar(rumps.App):
         """Tick du timer d'update (main thread) → lance un fetch en fond."""
         self._run_update_once()
 
-    def _start_auth_remind_timer(self) -> None:
-        """(Re)démarre le timer de rappel notif auth (toutes les
-        AUTH_REMIND_INTERVAL secondes). Idempotent (cf. _on_wake)."""
-        existing = getattr(self, "_auth_remind_timer", None)
-        if existing is not None:
-            try:
-                existing.stop()
-            except Exception:
-                pass
-        self._auth_remind_timer = rumps.Timer(
-            self._on_auth_remind_tick, AUTH_REMIND_INTERVAL
-        )
-        self._auth_remind_timer.start()
+    def _deliver_gws_auth_notif(self) -> None:
+        """Notif sticky « token Google expiré » (transition ou rappel 30 min).
 
-    def _on_auth_remind_tick(self, _: object) -> None:
-        """Si auth encore en erreur et online → re-pousse gws-auth-current."""
-        try:
-            data: dict = load_data()
-        except Exception:
-            return
-        if data.get("connectivity") == "offline":
-            return
-        if data.get("gws_auth_status") != "auth_error":
-            return
-        self._deliver_gws_auth_notif()
-
-    @staticmethod
-    def _deliver_gws_auth_notif() -> None:
-        """Notif sticky « token Google expiré » (transition ou rappel 30 min)."""
+        remove puis deliver : même identifier + même texte ne re-alerte pas
+        toujours sous NSUserNotification si la notif est déjà délivrée.
+        """
+        mac_notify.remove("gws-auth-current")
         mac_notify.deliver(
             "gws-auth-current",
             "🔑 Token Google expiré",
             "Exécuter : gws auth login",
             "Dashboard menubar",
         )
+        self._auth_remind_anchor = time.monotonic()
 
     def _run_update_once(self) -> None:
         """Exécute dashboard_update.py en arrière-plan, un seul à la fois.
@@ -582,7 +563,6 @@ class DashboardMenubar(rumps.App):
         fréquents « Maintenance Sleep »."""
         self._start_refresh_timer()
         self._start_update_timer()
-        self._start_auth_remind_timer()
         self._on_refresh_tick(None)
         self._run_update_once()
 
@@ -943,8 +923,8 @@ class DashboardMenubar(rumps.App):
         présents sans émettre de notification (évite un burst au démarrage) ;
         les passages suivants délèguent à `_sync_mail_notifications`.
         Auth gws : même amorce (mémoriser sans notif), puis deliver/remove
-        sur transition (`gws-auth-current`) ; un timer rappel toutes les
-        AUTH_REMIND_INTERVAL s si l'erreur persiste (online).
+        sur transition (`gws-auth-current`) ; rappel via ancre monotonic
+        toutes les AUTH_REMIND_INTERVAL s si l'erreur persiste (online).
         """
         gmail_ids: set[str] = {str(x) for x in data.get("unread_gmail_ids", []) if x}
         zimbra_ids: set[str] = {str(x) for x in data.get("unread_zimbra_ids", []) if x}
@@ -1017,6 +997,8 @@ class DashboardMenubar(rumps.App):
         if self._prev_gws_auth_status is None:
             # Amorce : pas de notif au démarrage même si déjà auth_error.
             self._prev_gws_auth_status = auth_status
+            if auth_status == "auth_error":
+                self._auth_remind_anchor = time.monotonic()
         elif offline:
             # Hors ligne : pas de notif auth (défense en profondeur).
             # On mémorise quand même le statut pour éviter un burst au retour.
@@ -1026,7 +1008,15 @@ class DashboardMenubar(rumps.App):
                 self._deliver_gws_auth_notif()
             elif self._prev_gws_auth_status == "auth_error":
                 mac_notify.remove("gws-auth-current")
+                self._auth_remind_anchor = None
             self._prev_gws_auth_status = auth_status
+        elif (
+            not offline
+            and auth_status == "auth_error"
+            and self._auth_remind_anchor is not None
+            and (time.monotonic() - self._auth_remind_anchor) >= AUTH_REMIND_INTERVAL
+        ):
+            self._deliver_gws_auth_notif()
 
 if __name__ == "__main__":
     _hide_dock_icon()
