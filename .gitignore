@@ -5,9 +5,8 @@ __pycache__/
 .DS_Store
 logs/
 dashboard.json
-.claude/
 
-### Docs Perso ###
+### Worklow IA ###
 .cursor
 memoire
 tasks
