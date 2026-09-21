@@ -3,7 +3,7 @@
 Une app macOS qui vit dans la barre de menus et affiche en un coup d'oeil :
 
 - **Google Calendar** : prochain événement (titre, horaire, lieu)
-- **Gmail** : nombre de mails non lus + expéditeur et résumé IA du dernier mail (via [OpenClaw](https://github.com/nicholasgasior/openclaw))
+- **Gmail** : nombre de mails non lus + expéditeur et résumé IA du dernier mail (via Azure OpenAI)
 - **Zimbra (UL)** : nombre de mails non lus + expéditeur et résumé IA du dernier mail (via IMAP)
 
 ![macOS](https://img.shields.io/badge/macOS-compatible-blue)
@@ -17,7 +17,7 @@ menubar.py (toujours actif via LaunchAgent)
    ├──(toutes les 2 min)── dashboard_update.py ──> dashboard.json
    │                            ├── gws ── Calendar + Gmail
    │                            ├── zimbra_unread (IMAP, .env) ── Zimbra UL
-   │                            └── summarize_mail.py ── OpenClaw (Gmail + Zimbra)
+   │                            └── summarize_mail.py ── Azure OpenAI (Gmail + Zimbra)
    └──(toutes les 10 s)── lit dashboard.json ──> barre de menus + badge (Gmail+Zimbra)
 ```
 
@@ -26,7 +26,7 @@ menubar.py (toujours actif via LaunchAgent)
 - **`dashboard_update.py`** appelle les APIs Google Calendar et Gmail via [`gws`](https://github.com/nicholasgasior/gws), interroge Zimbra via IMAP, et écrit le résultat dans `dashboard.json` à la racine du projet.
 - **`gws_errors.py`** détecte les échecs OAuth de gws (token révoqué, `invalid_grant`, credentials absents) à partir de la sortie du CLI.
 - **`zimbra_unread.py`** se connecte à la messagerie Zimbra de l'UL en IMAP (SSL, lecture seule), compte les non-lus et récupère le dernier sans le marquer comme lu.
-- **`summarize_mail.py`** envoie le corps du dernier mail (Gmail et Zimbra) à OpenClaw et écrit un résumé d'une phrase dans le JSON.
+- **`summarize_mail.py`** envoie le corps du dernier mail (Gmail et Zimbra) à Azure OpenAI et écrit un résumé d'une phrase dans le JSON.
 - Le menubar pilote les mises à jour (plus de LaunchAgent dédié à la collecte) : robuste face aux veilles fréquentes (anti-App-Nap + refresh au réveil).
 
 ## Installation
@@ -36,7 +36,7 @@ menubar.py (toujours actif via LaunchAgent)
 - macOS
 - Python 3.9+
 - [gws](https://github.com/nicholasgasior/gws) configuré avec un compte Google (`gws auth login`)
-- [OpenClaw](https://github.com/nicholasgasior/openclaw) pour le résumé IA des mails
+- Compte Azure OpenAI (clé API + endpoint + déploiement) pour le résumé IA des mails — voir `.env.example`
 - [Homebrew](https://brew.sh/) (recommandé)
 
 #### Zimbra (Université de Lorraine)
@@ -113,7 +113,7 @@ dashboard-menubar/
 ├── zimbra_unread.py        # Accès IMAP à la messagerie Zimbra UL
 ├── load_env.py             # Charge .env au démarrage
 ├── .env.example            # Modèle d'identifiants
-├── summarize_mail.py       # Résumé du dernier mail (Gmail + Zimbra) via OpenClaw
+├── summarize_mail.py       # Résumé du dernier mail (Gmail + Zimbra) via Azure OpenAI
 ├── dashboard.json          # Données collectées (gitignored)
 ├── assets/
 │   ├── bell.svg            # Icône source (SVG)

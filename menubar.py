@@ -60,8 +60,8 @@ UPDATE_INTERVAL: int = 120  # secondes entre deux fetch gws (collecte des donné
 AUTH_REMIND_INTERVAL: int = 30 * 60
 AUTH_NOTIF_PREFIX: str = "gws-auth-"
 # Nb max de ticks de refresh pendant lesquels on diffère une notif mail en
-# attendant le résumé OpenClaw. Garde-fou : au-delà, on notifie quand même
-# (si OpenClaw échoue, ne jamais notifier serait pire). ~2 min à 10 s/tick.
+# attendant le résumé IA. Garde-fou : au-delà, on notifie quand même
+# (si Azure OpenAI échoue, ne jamais notifier serait pire). ~2 min à 10 s/tick.
 MAX_NOTIF_DEFER_TICKS: int = 12
 UPDATE_SCRIPT: str = os.path.join(_SCRIPT_DIR, "dashboard_update.py")
 UPDATE_LOG: str = os.path.join(_SCRIPT_DIR, "logs", "dashboard-update.log")
@@ -192,7 +192,7 @@ def _format_mail_sender(from_header: str) -> str:
 
 
 def _mail_notification_body(mail: dict) -> str:
-    """Corps de la notif = résumé OpenClaw uniquement (jamais le sujet).
+    """Corps de la notif = résumé IA uniquement (jamais le sujet).
 
     Précondition : `mail` est un dict non vide.
     Invariant : tant que le résumé n'est pas prêt, on affiche un extrait ou
@@ -538,7 +538,7 @@ class DashboardMenubar(rumps.App):
     def _run_update_once(self) -> None:
         """Exécute dashboard_update.py en arrière-plan, un seul à la fois.
 
-        Le fetch gws/OpenClaw est lent (jusqu'à ~2 min) : il ne doit JAMAIS
+        Le fetch gws/Azure est lent (jusqu'à ~2 min) : il ne doit JAMAIS
         tourner sur le thread principal. Le verrou évite les chevauchements
         (tick périodique + réveil)."""
         if not self._update_lock.acquire(blocking=False):
@@ -859,7 +859,7 @@ class DashboardMenubar(rumps.App):
         nombre de ticks pendant lesquels on a différé l'émission.
         Invariants :
           - une seule bannière par source (identifiant fixe `{prefix}-current`) ;
-          - on NE notifie PAS un nouveau mail tant que son résumé OpenClaw n'est
+          - on NE notifie PAS un nouveau mail tant que son résumé IA n'est
             pas prêt (corps = résumé) ; garde-fou MAX_NOTIF_DEFER_TICKS pour ne
             jamais bloquer indéfiniment si le résumé n'arrive pas ;
           - tant qu'on diffère, les ids ne sont pas marqués « vus » (on réévalue
@@ -907,7 +907,7 @@ class DashboardMenubar(rumps.App):
             mac_notify.remove(notif_id)
             return "", "", 0
 
-        # Résumé OpenClaw arrivé après une émission au garde-fou → MAJ du corps.
+        # Résumé IA arrivé après une émission au garde-fou → MAJ du corps.
         if (
             active_id
             and isinstance(latest, dict)

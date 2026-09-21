@@ -7,7 +7,7 @@ Collecte :
   - Zimbra (messagerie UL) via IMAP (zimbra_unread.fetch_zimbra_mailbox).
 
 Écrit le résultat dans dashboard.json, puis lance summarize_mail.py si un
-dernier mail (Gmail ou Zimbra) n'a pas encore de résumé OpenClaw.
+dernier mail (Gmail ou Zimbra) n'a pas encore de résumé Azure OpenAI.
 
 Lancé toutes les 2 min par menubar.py (ou manuellement pour test).
 """
@@ -336,7 +336,7 @@ def main() -> None:
     print(f"OK — {len(next_events)} events, {unread_gmail} gmail, "
           f"{unread_zimbra} zimbra, {connectivity}, {now_local}")
 
-    # ── Summarize latest mail via OpenClaw (Gmail + Zimbra) ──
+    # ── Summarize latest mail via Azure OpenAI (Gmail + Zimbra) ──
     # On lance summarize_mail.py si l'un des deux derniers mails a un corps
     # mais pas encore de résumé. Le script boucle sur les deux côtés.
     def _needs_summary(m) -> bool:
