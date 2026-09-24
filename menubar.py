@@ -636,11 +636,7 @@ class DashboardMenubar(rumps.App):
                 self._active_gmail_body = ""
 
         self._run_on_main(_trashed)
-        self._collect_after_action(
-            restore_btn="gmail",
-            ok_title="🗑️ Gmail → corbeille",
-            ok_message="",
-        )
+        self._collect_after_action(restore_btn="gmail")
 
     def _trash_zimbra_worker(self) -> None:
         """Trash Zimbra + collecte (thread de fond)."""
@@ -679,11 +675,7 @@ class DashboardMenubar(rumps.App):
                 self._active_zimbra_body = ""
 
         self._run_on_main(_trashed)
-        self._collect_after_action(
-            restore_btn="zimbra",
-            ok_title="🗑️ Zimbra → corbeille",
-            ok_message="",
-        )
+        self._collect_after_action(restore_btn="zimbra")
 
     def _restore_trash_gmail_btn(self) -> None:
         self._trash_gmail_busy = False
@@ -695,16 +687,12 @@ class DashboardMenubar(rumps.App):
         self.mail_trash_zimbra_btn.title = "Supprimer last_unread Zimbra"
         self.mail_trash_zimbra_btn.set_callback(self.trash_zimbra_featured)
 
-    def _collect_after_action(
-        self,
-        *,
-        restore_btn: str,
-        ok_title: str,
-        ok_message: str,
-    ) -> None:
+    def _collect_after_action(self, *, restore_btn: str) -> None:
         """Collecte sous verrou (déjà sur un worker), puis UI + notif sur main.
 
         `restore_btn` : \"gmail\" | \"zimbra\" | \"force\".
+        Succès : notif uniquement pour \"force\" ; trash = refresh silencieux.
+        Erreurs : toujours notifiées.
         """
         status: str = "ok"
         err_msg: str = ""
@@ -745,7 +733,12 @@ class DashboardMenubar(rumps.App):
                     err_msg,
                 )
             else:
-                mac_notify.deliver("update-status", ok_title, ok_message)
+                if restore_btn == "force":
+                    mac_notify.deliver(
+                        "update-status",
+                        "✅ Dashboard mis à jour",
+                        "",
+                    )
                 self.refresh_data()
 
         self._run_on_main(_finish)
@@ -762,11 +755,7 @@ class DashboardMenubar(rumps.App):
 
     def _force_update_worker(self) -> None:
         """Exécute la collecte forcée (thread de fond, pas le main thread)."""
-        self._collect_after_action(
-            restore_btn="force",
-            ok_title="✅ Dashboard mis à jour",
-            ok_message="",
-        )
+        self._collect_after_action(restore_btn="force")
 
     # ─────────────────────────────────────────
     # Rendu / notifications
