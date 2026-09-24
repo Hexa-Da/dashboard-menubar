@@ -100,8 +100,10 @@ def trash_zimbra_message(
     """Copie le message UID vers Trash puis le retire de l'INBOX.
 
     Préconditions : uid / user / password non vides.
-    Invariant : écriture IMAP ciblée (pas readonly) ; le mail reste
-    récupérable dans le dossier Trash côté serveur.
+    Invariants :
+      - écriture IMAP ciblée (pas readonly) ; le mail reste récupérable dans Trash ;
+      - on pose \\Seen **avant** le COPY pour que la copie n'arrive pas
+        non lue dans la corbeille (flags IMAP souvent recopiés tels quels).
     """
     if not uid or not user or not password:
         raise ValueError("uid, user et password requis")
@@ -112,6 +114,11 @@ def trash_zimbra_message(
         status, _ = conn.select(mailbox, readonly=False)
         if status != "OK":
             raise RuntimeError(f"SELECT {mailbox} a échoué : {status}")
+
+        # Marquer lu avant COPY : sinon Trash hérite souvent de UNSEEN.
+        seen_status, _ = conn.uid("STORE", uid, "+FLAGS", r"(\Seen)")
+        if seen_status != "OK":
+            raise RuntimeError(f"STORE \\Seen a échoué : {seen_status}")
 
         trash_name: Optional[str] = _list_trash_mailbox(conn)
         candidates: list[str] = []
