@@ -7,7 +7,7 @@ Affiche dans la barre de menus macOS :
   - Gmail : nombre de non lus + expéditeur / résumé du dernier ;
   - Zimbra (UL, IMAP) : idem, section séparée ;
   - badge sur la cloche : total Gmail + Zimbra (affichage UI) ;
-  - actions : marquer Gmail/Zimbra comme lus (UI seulement),
+  - actions : corbeille du mail Gmail/Zimbra affiché (vedette),
     forcer une mise à jour, quitter.
 
 Les données sont lues depuis dashboard.json à la racine du projet
@@ -44,6 +44,8 @@ from Foundation import (
 
 import mac_notify
 from load_env import load_project_env
+from mail_trash import trash_gmail_message, trash_zimbra_message
+from zimbra_unread import DEFAULT_HOST, DEFAULT_PORT
 
 load_project_env()
 
@@ -308,15 +310,6 @@ class DashboardMenubar(rumps.App):
         # Ancre monotonic du dernier rappel auth (amorce ou deliver) ;
         # None = pas encore amorcé. Immune aux reset NSTimer wake/recover.
         self._auth_remind_anchor: Optional[float] = None
-        self._gmail_cleared: bool = False
-        self._last_known_unread: int = 0
-        self._last_known_gmail_ids: set[str] = set()
-        self._cleared_gmail_ids: set[str] = set()
-        # Zimbra : mêmes mécaniques que Gmail.
-        self._zimbra_cleared: bool = False
-        self._last_known_unread_zimbra: int = 0
-        self._last_known_zimbra_ids: set[str] = set()
-        self._cleared_zimbra_ids: set[str] = set()
 
         # Notifications natives par source (cf. mac_notify) :
         #  Une seule notification par source (gmail-current / zimbra-current) pour
@@ -334,6 +327,8 @@ class DashboardMenubar(rumps.App):
         self._button_configured: bool = False
         self._update_lock: threading.Lock = threading.Lock()
         self._last_refresh_tick_at: float = time.monotonic()
+        self._trash_gmail_busy: bool = False
+        self._trash_zimbra_busy: bool = False
 
         # ── Événement ──────────────────────────────────
         self.event_title = rumps.MenuItem(
@@ -373,11 +368,11 @@ class DashboardMenubar(rumps.App):
             "Dernière mise à jour : —",
             callback=_open_in_browser(f"file://{DATA_FILE}"),
         )
-        self.mail_clear_btn = rumps.MenuItem(
-            "Marquer Gmail comme lu", callback=self.clear_gmail_local
+        self.mail_trash_gmail_btn = rumps.MenuItem(
+            "Supprimer last_unread Gmail", callback=self.trash_gmail_featured
         )
-        self.zimbra_clear_btn = rumps.MenuItem(
-            "Marquer Zimbra comme lu", callback=self.clear_zimbra_local
+        self.mail_trash_zimbra_btn = rumps.MenuItem(
+            "Supprimer last_unread Zimbra", callback=self.trash_zimbra_featured
         )
         self.force_update_btn = rumps.MenuItem(
             "Forcer la mise à jour", callback=self.force_update
@@ -398,8 +393,8 @@ class DashboardMenubar(rumps.App):
             self.zimbra_summary,
             None,
             self.last_updated_btn,
-            self.mail_clear_btn,
-            self.zimbra_clear_btn,
+            self.mail_trash_gmail_btn,
+            self.mail_trash_zimbra_btn,
             self.force_update_btn,
             None,
             self.quit_btn,
@@ -592,68 +587,126 @@ class DashboardMenubar(rumps.App):
         except Exception:
             pass
 
-    def _refresh_badge(self) -> None:
-        """Recalcule le badge cloche = Gmail affiché + Zimbra affiché."""
-        gmail_shown: int = 0 if self._gmail_cleared else self._last_known_unread
-        zimbra_shown: int = 0 if self._zimbra_cleared else self._last_known_unread_zimbra
-        total: int = gmail_shown + zimbra_shown
-        self.title = str(total) if total > 0 else ""
+    def trash_gmail_featured(self, _: object) -> None:
+        """Met à la corbeille le mail Gmail affiché (latest_unread.id)."""
+        if self._trash_gmail_busy:
+            return
+        self._trash_gmail_busy = True
+        self.mail_trash_gmail_btn.title = "Supprimer last_unread Gmail…"
+        self.mail_trash_gmail_btn.set_callback(None)
+        threading.Thread(target=self._trash_gmail_worker, daemon=True).start()
 
-    def clear_gmail_local(self, _: object) -> None:
-        """Marque les mails comme « lus » côté interface seulement.
+    def trash_zimbra_featured(self, _: object) -> None:
+        """Met à la corbeille le mail Zimbra affiché (latest_unread_zimbra.id)."""
+        if self._trash_zimbra_busy:
+            return
+        self._trash_zimbra_busy = True
+        self.mail_trash_zimbra_btn.title = "Supprimer last_unread Zimbra…"
+        self.mail_trash_zimbra_btn.set_callback(None)
+        threading.Thread(target=self._trash_zimbra_worker, daemon=True).start()
 
-        Effets : flag `_gmail_cleared` + snapshot des ids non lus. Tant qu'aucun
-        nouvel id non lu n'apparaît, l'UI affiche 0.
+    def _trash_gmail_worker(self) -> None:
+        """Trash Gmail + collecte (thread de fond)."""
+        data: dict = load_data()
+        latest: object = data.get("latest_unread")
+        message_id: str = (
+            str(latest.get("id", "")).strip() if isinstance(latest, dict) else ""
+        )
+        err: str = ""
+        if not message_id:
+            err = "Aucun mail Gmail affiché."
+        else:
+            try:
+                trash_gmail_message(message_id)
+            except Exception as exc:
+                err = str(exc)[:150]
+
+        if err:
+            def _fail() -> None:
+                self._restore_trash_gmail_btn()
+                mac_notify.deliver("update-status", "⚠️ Corbeille Gmail", err)
+
+            self._run_on_main(_fail)
+            return
+
+        def _trashed() -> None:
+            if self._active_gmail_id:
+                mac_notify.remove("gmail-current")
+                self._active_gmail_id = ""
+                self._active_gmail_body = ""
+
+        self._run_on_main(_trashed)
+        self._collect_after_action(
+            restore_btn="gmail",
+            ok_title="🗑️ Gmail → corbeille",
+            ok_message="",
+        )
+
+    def _trash_zimbra_worker(self) -> None:
+        """Trash Zimbra + collecte (thread de fond)."""
+        data: dict = load_data()
+        latest: object = data.get("latest_unread_zimbra")
+        uid: str = (
+            str(latest.get("id", "")).strip() if isinstance(latest, dict) else ""
+        )
+        user: str = (os.environ.get("ZIMBRA_USER") or "").strip()
+        password: str = (os.environ.get("ZIMBRA_PASS") or "").strip()
+        err: str = ""
+        if not uid:
+            err = "Aucun mail Zimbra affiché."
+        elif not user or not password:
+            err = "ZIMBRA_USER / ZIMBRA_PASS manquants."
+        else:
+            try:
+                host: str = os.environ.get("ZIMBRA_IMAP_HOST", DEFAULT_HOST)
+                port: int = int(os.environ.get("ZIMBRA_IMAP_PORT", str(DEFAULT_PORT)))
+                trash_zimbra_message(uid, user, password, host=host, port=port)
+            except Exception as exc:
+                err = str(exc)[:150]
+
+        if err:
+            def _fail() -> None:
+                self._restore_trash_zimbra_btn()
+                mac_notify.deliver("update-status", "⚠️ Corbeille Zimbra", err)
+
+            self._run_on_main(_fail)
+            return
+
+        def _trashed() -> None:
+            if self._active_zimbra_id:
+                mac_notify.remove("zimbra-current")
+                self._active_zimbra_id = ""
+                self._active_zimbra_body = ""
+
+        self._run_on_main(_trashed)
+        self._collect_after_action(
+            restore_btn="zimbra",
+            ok_title="🗑️ Zimbra → corbeille",
+            ok_message="",
+        )
+
+    def _restore_trash_gmail_btn(self) -> None:
+        self._trash_gmail_busy = False
+        self.mail_trash_gmail_btn.title = "Supprimer last_unread Gmail"
+        self.mail_trash_gmail_btn.set_callback(self.trash_gmail_featured)
+
+    def _restore_trash_zimbra_btn(self) -> None:
+        self._trash_zimbra_busy = False
+        self.mail_trash_zimbra_btn.title = "Supprimer last_unread Zimbra"
+        self.mail_trash_zimbra_btn.set_callback(self.trash_zimbra_featured)
+
+    def _collect_after_action(
+        self,
+        *,
+        restore_btn: str,
+        ok_title: str,
+        ok_message: str,
+    ) -> None:
+        """Collecte sous verrou (déjà sur un worker), puis UI + notif sur main.
+
+        `restore_btn` : \"gmail\" | \"zimbra\" | \"force\".
         """
-        self._gmail_cleared = True
-        self._cleared_gmail_ids = set(self._last_known_gmail_ids)
-        # Retire la bannière affichée SANS vider `_seen_gmail_ids` : les mails
-        # restent non lus côté serveur, on ne veut donc pas les re-notifier au
-        # prochain refresh.
-        if self._active_gmail_id:
-            mac_notify.remove("gmail-current")
-            self._active_gmail_id = ""
-            self._active_gmail_body = ""
-        self.mail_gmail.title = "✉️ Gmail : 0 non lu"
-        self.mail_from.title = "   👤 —"
-        self.mail_summary.title = "   💬 —"
-        self._refresh_badge()
-
-    def clear_zimbra_local(self, _: object) -> None:
-        """Marque les mails Zimbra comme « lus » côté interface seulement.
-
-        Symétrique de clear_gmail_local : flag + snapshot d'ids. IMAP reste
-        en readonly, donc rien n'est modifié côté serveur.
-        """
-        self._zimbra_cleared = True
-        self._cleared_zimbra_ids = set(self._last_known_zimbra_ids)
-        # Symétrique de clear_gmail_local : retire la bannière, garde `_seen`.
-        if self._active_zimbra_id:
-            mac_notify.remove("zimbra-current")
-            self._active_zimbra_id = ""
-            self._active_zimbra_body = ""
-        self.mail_zimbra.title = "✉️ Zimbra : 0 non lu"
-        self.zimbra_from.title = "   👤 —"
-        self.zimbra_summary.title = "   💬 —"
-        self._refresh_badge()
-
-    def force_update(self, _: object) -> None:
-        """Force une collecte immédiate.
-
-        Délègue au même script que la collecte périodique (dashboard_update.py)
-        pour une logique unique et robuste, sous le verrou partagé (pas de
-        collecte concurrente). Rafraîchit l'UI à la fin.
-        """
-        self.force_update_btn.title = "Mise à jour en cours..."
-        threading.Thread(target=self._force_update_worker, daemon=True).start()
-
-    def _force_update_worker(self) -> None:
-        """Exécute la collecte forcée (thread de fond, pas le main thread).
-
-        Invariant : aucun appel mac_notify ici — le worker calcule un statut,
-        puis un seul `_finish` sur le main thread fait bouton + notif + refresh.
-        """
-        status: str = "ok"  # "ok" | "blocked" | "error"
+        status: str = "ok"
         err_msg: str = ""
         try:
             acquired: bool = self._update_lock.acquire(timeout=UPDATE_LOCK_TIMEOUT)
@@ -673,7 +726,12 @@ class DashboardMenubar(rumps.App):
             err_msg = str(exc)[:150]
 
         def _finish() -> None:
-            self.force_update_btn.title = "Forcer la mise à jour"
+            if restore_btn == "gmail":
+                self._restore_trash_gmail_btn()
+            elif restore_btn == "zimbra":
+                self._restore_trash_zimbra_btn()
+            else:
+                self.force_update_btn.title = "Forcer la mise à jour"
             if status == "blocked":
                 mac_notify.deliver(
                     "update-status",
@@ -687,14 +745,28 @@ class DashboardMenubar(rumps.App):
                     err_msg,
                 )
             else:
-                mac_notify.deliver(
-                    "update-status",
-                    "✅ Dashboard mis à jour",
-                    "",
-                )
+                mac_notify.deliver("update-status", ok_title, ok_message)
                 self.refresh_data()
 
         self._run_on_main(_finish)
+
+    def force_update(self, _: object) -> None:
+        """Force une collecte immédiate.
+
+        Délègue au même script que la collecte périodique (dashboard_update.py)
+        pour une logique unique et robuste, sous le verrou partagé (pas de
+        collecte concurrente). Rafraîchit l'UI à la fin.
+        """
+        self.force_update_btn.title = "Mise à jour en cours..."
+        threading.Thread(target=self._force_update_worker, daemon=True).start()
+
+    def _force_update_worker(self) -> None:
+        """Exécute la collecte forcée (thread de fond, pas le main thread)."""
+        self._collect_after_action(
+            restore_btn="force",
+            ok_title="✅ Dashboard mis à jour",
+            ok_message="",
+        )
 
     # ─────────────────────────────────────────
     # Rendu / notifications
@@ -746,17 +818,7 @@ class DashboardMenubar(rumps.App):
             )
 
         # ── Gmail ─────────────────────────────────────
-        gmail_raw: int = int(data.get("unread_gmail", 0))
-        gmail_ids: set[str] = {
-            str(x) for x in data.get("unread_gmail_ids", []) if x
-        }
-        # Un nouvel id non lu (absent du snapshot au clear) annule le
-        # « marqué comme lu » manuel — même si le compteur reste à 1.
-        if self._gmail_cleared and (gmail_ids - self._cleared_gmail_ids):
-            self._gmail_cleared = False
-        self._last_known_unread = gmail_raw
-        self._last_known_gmail_ids = gmail_ids
-        gmail_shown: int = 0 if self._gmail_cleared else gmail_raw
+        gmail_shown: int = int(data.get("unread_gmail", 0))
 
         gmail_title: str = (
             f"✉️ Gmail : {gmail_shown} non lu{'s' if gmail_shown > 1 else ''}"
@@ -788,15 +850,7 @@ class DashboardMenubar(rumps.App):
             self.mail_summary.title = "   💬 —"
 
         # ── Zimbra ────────────────────────────────────
-        zimbra_raw: int = int(data.get("unread_zimbra", 0))
-        zimbra_ids: set[str] = {
-            str(x) for x in data.get("unread_zimbra_ids", []) if x
-        }
-        if self._zimbra_cleared and (zimbra_ids - self._cleared_zimbra_ids):
-            self._zimbra_cleared = False
-        self._last_known_unread_zimbra = zimbra_raw
-        self._last_known_zimbra_ids = zimbra_ids
-        zimbra_shown: int = 0 if self._zimbra_cleared else zimbra_raw
+        zimbra_shown: int = int(data.get("unread_zimbra", 0))
 
         zimbra_title: str = (
             f"✉️ Zimbra : {zimbra_shown} non lu{'s' if zimbra_shown > 1 else ''}"
@@ -837,6 +891,32 @@ class DashboardMenubar(rumps.App):
                 self.last_updated_btn.title = "Dernière mise à jour : —"
         else:
             self.last_updated_btn.title = "Dernière mise à jour : —"
+
+        # Activer Corbeille seulement s'il y a une vedette avec id
+        # (ne pas toucher aux boutons pendant une corbeille en cours).
+        if not self._trash_gmail_busy:
+            latest_g: object = data.get("latest_unread")
+            can_trash_g: bool = (
+                gmail_shown > 0
+                and isinstance(latest_g, dict)
+                and bool(str(latest_g.get("id", "")).strip())
+            )
+            if can_trash_g:
+                self.mail_trash_gmail_btn.set_callback(self.trash_gmail_featured)
+            else:
+                self.mail_trash_gmail_btn.set_callback(None)
+
+        if not self._trash_zimbra_busy:
+            latest_z_btn: object = data.get("latest_unread_zimbra")
+            can_trash_z: bool = (
+                zimbra_shown > 0
+                and isinstance(latest_z_btn, dict)
+                and bool(str(latest_z_btn.get("id", "")).strip())
+            )
+            if can_trash_z:
+                self.mail_trash_zimbra_btn.set_callback(self.trash_zimbra_featured)
+            else:
+                self.mail_trash_zimbra_btn.set_callback(None)
 
     def _sync_mail_notifications(
         self,

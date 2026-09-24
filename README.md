@@ -86,8 +86,8 @@ de mail, avec rotation à 512 Kio et conservation de trois archives.
 | Gmail : X non lus | Ouvre Gmail |
 | Zimbra : X non lus | Ouvre le webmail UL |
 | Dernière mise à jour | Ouvre le fichier JSON |
-| Marquer Gmail comme lu | Masque le compteur Gmail (UI uniquement) |
-| Marquer Zimbra comme lu | Masque le compteur Zimbra (UI uniquement) |
+| Supprimer last_unread Gmail | Met à la corbeille le mail Gmail dont le résumé est affiché, puis relance une collecte |
+| Supprimer last_unread Zimbra | Idem pour le mail Zimbra affiché (IMAP → dossier Trash) |
 | Forcer la mise à jour | Appelle Google + Zimbra et réécrit le JSON |
 | Quitter | Ferme l'app |
 
@@ -110,6 +110,7 @@ dashboard-menubar/
 ├── menubar.py              # App barre de menus (rumps)
 ├── dashboard_update.py     # Collecte Calendar + Gmail + Zimbra
 ├── gws_errors.py           # Détection erreurs OAuth gws
+├── mail_trash.py           # Corbeille du mail vedette (Gmail gws / Zimbra IMAP)
 ├── zimbra_unread.py        # Accès IMAP à la messagerie Zimbra UL
 ├── load_env.py             # Charge .env au démarrage
 ├── .env.example            # Modèle d'identifiants

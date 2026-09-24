@@ -6,8 +6,8 @@ Canal unique du menubar pour toutes les notifications (mails, prochain
 événement, feedback « Forcer la mise à jour », et futurs cas sticky).
 
 Émet via `NSUserNotificationCenter` (PyObjC). Chaque notification porte un
-`identifier` unique, ce qui permet de la RETIRER plus tard (au clic « marquer
-comme lu », disparition du mail, ou fin d'un état sticky).
+`identifier` unique, ce qui permet de la RETIRER plus tard (corbeille du mail
+vedette, disparition du mail, ou fin d'un état sticky).
 
 Contrainte connue : `NSUserNotificationCenter` est déprécié depuis macOS 11
 mais reste fonctionnel et ne nécessite pas d'autorisation explicite, contrairement

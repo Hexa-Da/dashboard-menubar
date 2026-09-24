@@ -5,6 +5,9 @@ Zimbra Unread — Accès IMAP à la messagerie étudiante UL
 Récupère le nombre de mails non lus et le détail du dernier non lu sur la
 messagerie Zimbra de l'Université de Lorraine via IMAP (SSL).
 
+La collecte (`fetch_zimbra_mailbox`) ouvre la boîte en **readonly** (BODY.PEEK).
+La mise à la corbeille est isolée dans `mail_trash.trash_zimbra_message`.
+
 Pourquoi IMAP et pas SOAP/CAS : la connexion web passe par le SSO CAS, donc
 pas de login/mot de passe direct côté navigateur. IMAP accepte l'identifiant
 + mot de passe ENT et reste le chemin validé pour un script.
