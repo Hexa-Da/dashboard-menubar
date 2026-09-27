@@ -7,7 +7,7 @@ Affiche dans la barre de menus macOS :
   - Gmail : nombre de non lus + expéditeur / résumé du dernier ;
   - Zimbra (UL, IMAP) : idem, section séparée ;
   - badge sur la cloche : total Gmail + Zimbra (affichage UI) ;
-  - actions : corbeille du mail Gmail/Zimbra affiché (vedette),
+  - actions : marquer lu / corbeille du mail Gmail/Zimbra affiché (vedette),
     forcer une mise à jour, quitter.
 
 Les données sont lues depuis dashboard.json à la racine du projet
@@ -44,7 +44,12 @@ from Foundation import (
 
 import mac_notify
 from load_env import load_project_env
-from mail_trash import trash_gmail_message, trash_zimbra_message
+from mail_trash import (
+    mark_gmail_message_read,
+    mark_zimbra_message_read,
+    trash_gmail_message,
+    trash_zimbra_message,
+)
 from zimbra_unread import DEFAULT_HOST, DEFAULT_PORT
 
 load_project_env()
@@ -329,6 +334,8 @@ class DashboardMenubar(rumps.App):
         self._last_refresh_tick_at: float = time.monotonic()
         self._trash_gmail_busy: bool = False
         self._trash_zimbra_busy: bool = False
+        self._mark_gmail_busy: bool = False
+        self._mark_zimbra_busy: bool = False
 
         # ── Événement ──────────────────────────────────
         self.event_title = rumps.MenuItem(
@@ -368,6 +375,14 @@ class DashboardMenubar(rumps.App):
             "Dernière mise à jour : —",
             callback=_open_in_browser(f"file://{DATA_FILE}"),
         )
+        self.mail_mark_gmail_btn = rumps.MenuItem(
+            "Marquer last_unread Gmail comme lu",
+            callback=self.mark_gmail_featured,
+        )
+        self.mail_mark_zimbra_btn = rumps.MenuItem(
+            "Marquer last_unread Zimbra comme lu",
+            callback=self.mark_zimbra_featured,
+        )
         self.mail_trash_gmail_btn = rumps.MenuItem(
             "Supprimer last_unread Gmail", callback=self.trash_gmail_featured
         )
@@ -393,6 +408,8 @@ class DashboardMenubar(rumps.App):
             self.zimbra_summary,
             None,
             self.last_updated_btn,
+            self.mail_mark_gmail_btn,
+            self.mail_mark_zimbra_btn,
             self.mail_trash_gmail_btn,
             self.mail_trash_zimbra_btn,
             self.force_update_btn,
@@ -587,6 +604,24 @@ class DashboardMenubar(rumps.App):
         except Exception:
             pass
 
+    def mark_gmail_featured(self, _: object) -> None:
+        """Marque comme lu le mail Gmail affiché (latest_unread.id)."""
+        if self._mark_gmail_busy:
+            return
+        self._mark_gmail_busy = True
+        self.mail_mark_gmail_btn.title = "Marquer last_unread Gmail comme lu…"
+        self.mail_mark_gmail_btn.set_callback(None)
+        threading.Thread(target=self._mark_gmail_worker, daemon=True).start()
+
+    def mark_zimbra_featured(self, _: object) -> None:
+        """Marque comme lu le mail Zimbra affiché (latest_unread_zimbra.id)."""
+        if self._mark_zimbra_busy:
+            return
+        self._mark_zimbra_busy = True
+        self.mail_mark_zimbra_btn.title = "Marquer last_unread Zimbra comme lu…"
+        self.mail_mark_zimbra_btn.set_callback(None)
+        threading.Thread(target=self._mark_zimbra_worker, daemon=True).start()
+
     def trash_gmail_featured(self, _: object) -> None:
         """Met à la corbeille le mail Gmail affiché (latest_unread.id)."""
         if self._trash_gmail_busy:
@@ -604,6 +639,78 @@ class DashboardMenubar(rumps.App):
         self.mail_trash_zimbra_btn.title = "Supprimer last_unread Zimbra…"
         self.mail_trash_zimbra_btn.set_callback(None)
         threading.Thread(target=self._trash_zimbra_worker, daemon=True).start()
+
+    def _mark_gmail_worker(self) -> None:
+        """Mark-as-read Gmail + collecte (thread de fond)."""
+        data: dict = load_data()
+        latest: object = data.get("latest_unread")
+        message_id: str = (
+            str(latest.get("id", "")).strip() if isinstance(latest, dict) else ""
+        )
+        err: str = ""
+        if not message_id:
+            err = "Aucun mail Gmail affiché."
+        else:
+            try:
+                mark_gmail_message_read(message_id)
+            except Exception as exc:
+                err = str(exc)[:150]
+
+        if err:
+            def _fail() -> None:
+                self._restore_mark_gmail_btn()
+                mac_notify.deliver("update-status", "⚠️ Lu Gmail", err)
+
+            self._run_on_main(_fail)
+            return
+
+        def _marked() -> None:
+            if self._active_gmail_id:
+                mac_notify.remove("gmail-current")
+                self._active_gmail_id = ""
+                self._active_gmail_body = ""
+
+        self._run_on_main(_marked)
+        self._collect_after_action(restore_btn="mark_gmail")
+
+    def _mark_zimbra_worker(self) -> None:
+        """Mark-as-read Zimbra + collecte (thread de fond)."""
+        data: dict = load_data()
+        latest: object = data.get("latest_unread_zimbra")
+        uid: str = (
+            str(latest.get("id", "")).strip() if isinstance(latest, dict) else ""
+        )
+        user: str = (os.environ.get("ZIMBRA_USER") or "").strip()
+        password: str = (os.environ.get("ZIMBRA_PASS") or "").strip()
+        err: str = ""
+        if not uid:
+            err = "Aucun mail Zimbra affiché."
+        elif not user or not password:
+            err = "ZIMBRA_USER / ZIMBRA_PASS manquants."
+        else:
+            try:
+                host: str = os.environ.get("ZIMBRA_IMAP_HOST", DEFAULT_HOST)
+                port: int = int(os.environ.get("ZIMBRA_IMAP_PORT", str(DEFAULT_PORT)))
+                mark_zimbra_message_read(uid, user, password, host=host, port=port)
+            except Exception as exc:
+                err = str(exc)[:150]
+
+        if err:
+            def _fail() -> None:
+                self._restore_mark_zimbra_btn()
+                mac_notify.deliver("update-status", "⚠️ Lu Zimbra", err)
+
+            self._run_on_main(_fail)
+            return
+
+        def _marked() -> None:
+            if self._active_zimbra_id:
+                mac_notify.remove("zimbra-current")
+                self._active_zimbra_id = ""
+                self._active_zimbra_body = ""
+
+        self._run_on_main(_marked)
+        self._collect_after_action(restore_btn="mark_zimbra")
 
     def _trash_gmail_worker(self) -> None:
         """Trash Gmail + collecte (thread de fond)."""
@@ -677,6 +784,16 @@ class DashboardMenubar(rumps.App):
         self._run_on_main(_trashed)
         self._collect_after_action(restore_btn="zimbra")
 
+    def _restore_mark_gmail_btn(self) -> None:
+        self._mark_gmail_busy = False
+        self.mail_mark_gmail_btn.title = "Marquer last_unread Gmail comme lu"
+        self.mail_mark_gmail_btn.set_callback(self.mark_gmail_featured)
+
+    def _restore_mark_zimbra_btn(self) -> None:
+        self._mark_zimbra_busy = False
+        self.mail_mark_zimbra_btn.title = "Marquer last_unread Zimbra comme lu"
+        self.mail_mark_zimbra_btn.set_callback(self.mark_zimbra_featured)
+
     def _restore_trash_gmail_btn(self) -> None:
         self._trash_gmail_busy = False
         self.mail_trash_gmail_btn.title = "Supprimer last_unread Gmail"
@@ -690,8 +807,8 @@ class DashboardMenubar(rumps.App):
     def _collect_after_action(self, *, restore_btn: str) -> None:
         """Collecte sous verrou (déjà sur un worker), puis UI + notif sur main.
 
-        `restore_btn` : \"gmail\" | \"zimbra\" | \"force\".
-        Succès : notif uniquement pour \"force\" ; trash = refresh silencieux.
+        `restore_btn` : \"gmail\" | \"zimbra\" | \"mark_gmail\" | \"mark_zimbra\" | \"force\".
+        Succès : notif uniquement pour \"force\" ; mark/trash = refresh silencieux.
         Erreurs : toujours notifiées.
         """
         status: str = "ok"
@@ -718,6 +835,10 @@ class DashboardMenubar(rumps.App):
                 self._restore_trash_gmail_btn()
             elif restore_btn == "zimbra":
                 self._restore_trash_zimbra_btn()
+            elif restore_btn == "mark_gmail":
+                self._restore_mark_gmail_btn()
+            elif restore_btn == "mark_zimbra":
+                self._restore_mark_zimbra_btn()
             else:
                 self.force_update_btn.title = "Forcer la mise à jour"
             if status == "blocked":
@@ -881,28 +1002,38 @@ class DashboardMenubar(rumps.App):
         else:
             self.last_updated_btn.title = "Dernière mise à jour : —"
 
-        # Activer Corbeille seulement s'il y a une vedette avec id
-        # (ne pas toucher aux boutons pendant une corbeille en cours).
+        # Activer Marquer lu / Corbeille seulement s'il y a une vedette avec id
+        # (ne pas toucher aux boutons pendant une action en cours).
+        latest_g: object = data.get("latest_unread")
+        can_act_g: bool = (
+            gmail_shown > 0
+            and isinstance(latest_g, dict)
+            and bool(str(latest_g.get("id", "")).strip())
+        )
+        if not self._mark_gmail_busy:
+            if can_act_g:
+                self.mail_mark_gmail_btn.set_callback(self.mark_gmail_featured)
+            else:
+                self.mail_mark_gmail_btn.set_callback(None)
         if not self._trash_gmail_busy:
-            latest_g: object = data.get("latest_unread")
-            can_trash_g: bool = (
-                gmail_shown > 0
-                and isinstance(latest_g, dict)
-                and bool(str(latest_g.get("id", "")).strip())
-            )
-            if can_trash_g:
+            if can_act_g:
                 self.mail_trash_gmail_btn.set_callback(self.trash_gmail_featured)
             else:
                 self.mail_trash_gmail_btn.set_callback(None)
 
+        latest_z_btn: object = data.get("latest_unread_zimbra")
+        can_act_z: bool = (
+            zimbra_shown > 0
+            and isinstance(latest_z_btn, dict)
+            and bool(str(latest_z_btn.get("id", "")).strip())
+        )
+        if not self._mark_zimbra_busy:
+            if can_act_z:
+                self.mail_mark_zimbra_btn.set_callback(self.mark_zimbra_featured)
+            else:
+                self.mail_mark_zimbra_btn.set_callback(None)
         if not self._trash_zimbra_busy:
-            latest_z_btn: object = data.get("latest_unread_zimbra")
-            can_trash_z: bool = (
-                zimbra_shown > 0
-                and isinstance(latest_z_btn, dict)
-                and bool(str(latest_z_btn.get("id", "")).strip())
-            )
-            if can_trash_z:
+            if can_act_z:
                 self.mail_trash_zimbra_btn.set_callback(self.trash_zimbra_featured)
             else:
                 self.mail_trash_zimbra_btn.set_callback(None)

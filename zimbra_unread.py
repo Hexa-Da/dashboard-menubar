@@ -6,7 +6,8 @@ Récupère le nombre de mails non lus et le détail du dernier non lu sur la
 messagerie Zimbra de l'Université de Lorraine via IMAP (SSL).
 
 La collecte (`fetch_zimbra_mailbox`) ouvre la boîte en **readonly** (BODY.PEEK).
-La mise à la corbeille est isolée dans `mail_trash.trash_zimbra_message`.
+Les écritures (\\Seen / corbeille) sont isolées dans `mail_trash`
+(`mark_zimbra_message_read`, `trash_zimbra_message`).
 
 Pourquoi IMAP et pas SOAP/CAS : la connexion web passe par le SSO CAS, donc
 pas de login/mot de passe direct côté navigateur. IMAP accepte l'identifiant

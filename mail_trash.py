@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """
-Mail Trash — Mise à la corbeille du mail vedette (Gmail / Zimbra)
+Mail Trash — Actions écriture sur le mail vedette (Gmail / Zimbra)
 
 Cible uniquement l'id fourni (celui de `latest_unread` / `latest_unread_zimbra`
-dans dashboard.json). Gmail via `gws` (messages.trash) ; Zimbra via IMAP
-(COPY vers Trash puis suppression de l'INBOX).
+dans dashboard.json) :
+  - corbeille : Gmail via `gws` (messages.trash) ; Zimbra via IMAP
+    (\\Seen puis COPY vers Trash puis suppression de l'INBOX) ;
+  - marquer lu : Gmail via `gws` (messages.modify, retire UNREAD) ;
+    Zimbra via IMAP (\\Seen seul).
 
 Précondition d'appel : hors du main thread menubar (réseau / subprocess).
 """
@@ -37,6 +40,15 @@ def _gws_env() -> dict:
     return env
 
 
+def _gws_fail(proc: subprocess.CompletedProcess[str]) -> None:
+    """Lève RuntimeError tronquée depuis une sortie gws en échec."""
+    detail: str = (proc.stderr or proc.stdout or "").strip()
+    if not detail:
+        detail = f"gws exit {proc.returncode}"
+    # Tronquer : pas de corps de mail dans les erreurs remontées à l'UI.
+    raise RuntimeError(detail[:200])
+
+
 def trash_gmail_message(message_id: str, *, timeout: int = 30) -> None:
     """Déplace le message Gmail `message_id` vers la corbeille (API trash).
 
@@ -62,11 +74,37 @@ def trash_gmail_message(message_id: str, *, timeout: int = 30) -> None:
     )
     if proc.returncode == 0:
         return
-    detail: str = (proc.stderr or proc.stdout or "").strip()
-    if not detail:
-        detail = f"gws exit {proc.returncode}"
-    # Tronquer : pas de corps de mail dans les erreurs remontées à l'UI.
-    raise RuntimeError(detail[:200])
+    _gws_fail(proc)
+
+
+def mark_gmail_message_read(message_id: str, *, timeout: int = 30) -> None:
+    """Retire le label UNREAD du message Gmail `message_id` (API modify).
+
+    Précondition : `message_id` non vide.
+    Lève RuntimeError si gws échoue (auth, scope, id inconnu, réseau).
+    """
+    if not message_id:
+        raise ValueError("message_id requis")
+    proc: subprocess.CompletedProcess[str] = subprocess.run(
+        [
+            "gws",
+            "gmail",
+            "users",
+            "messages",
+            "modify",
+            "--params",
+            json.dumps({"userId": "me", "id": message_id}),
+            "--json",
+            json.dumps({"removeLabelIds": ["UNREAD"]}),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        env=_gws_env(),
+    )
+    if proc.returncode == 0:
+        return
+    _gws_fail(proc)
 
 
 def _list_trash_mailbox(conn: imaplib.IMAP4_SSL) -> Optional[str]:
@@ -85,6 +123,44 @@ def _list_trash_mailbox(conn: imaplib.IMAP4_SSL) -> Optional[str]:
         if len(parts) >= 2 and parts[-2]:
             return parts[-2]
     return None
+
+
+def _imap_mark_seen(conn: imaplib.IMAP4_SSL, uid: str) -> None:
+    """Pose \\Seen sur l'UID (mailbox déjà SELECT en écriture)."""
+    seen_status, _ = conn.uid("STORE", uid, "+FLAGS", r"(\Seen)")
+    if seen_status != "OK":
+        raise RuntimeError(f"STORE \\Seen a échoué : {seen_status}")
+
+
+def mark_zimbra_message_read(
+    uid: str,
+    user: str,
+    password: str,
+    *,
+    host: str = DEFAULT_HOST,
+    port: int = DEFAULT_PORT,
+    timeout: int = DEFAULT_TIMEOUT,
+    mailbox: str = "INBOX",
+) -> None:
+    """Marque le message UID comme lu (\\Seen) dans l'INBOX.
+
+    Préconditions : uid / user / password non vides.
+    """
+    if not uid or not user or not password:
+        raise ValueError("uid, user et password requis")
+
+    conn: imaplib.IMAP4_SSL = imaplib.IMAP4_SSL(host, port, timeout=timeout)
+    try:
+        conn.login(user, password)
+        status, _ = conn.select(mailbox, readonly=False)
+        if status != "OK":
+            raise RuntimeError(f"SELECT {mailbox} a échoué : {status}")
+        _imap_mark_seen(conn, uid)
+    finally:
+        try:
+            conn.logout()
+        except Exception:
+            pass
 
 
 def trash_zimbra_message(
@@ -116,9 +192,7 @@ def trash_zimbra_message(
             raise RuntimeError(f"SELECT {mailbox} a échoué : {status}")
 
         # Marquer lu avant COPY : sinon Trash hérite souvent de UNSEEN.
-        seen_status, _ = conn.uid("STORE", uid, "+FLAGS", r"(\Seen)")
-        if seen_status != "OK":
-            raise RuntimeError(f"STORE \\Seen a échoué : {seen_status}")
+        _imap_mark_seen(conn, uid)
 
         trash_name: Optional[str] = _list_trash_mailbox(conn)
         candidates: list[str] = []
