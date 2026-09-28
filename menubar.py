@@ -144,13 +144,13 @@ def _open_in_browser(url: str) -> Callable[[object], None]:
         if bundle_id == "org.mozilla.firefox" and not (
             NSRunningApplication.runningApplicationsWithBundleIdentifier_(bundle_id)
         ):
-            executable = browser_bundle.executablePath()
-            if executable:
-                try:
-                    subprocess.Popen([executable, url], start_new_session=True)
-                    return
-                except OSError:
-                    pass
+            # Cold start via LaunchServices + URL en arg : profil OK, pas d'onglet vide.
+            # (Popen du binaire Mach-O cassait le chargement du profil Firefox.)
+            subprocess.run(
+                ["open", "-b", bundle_id, "--args", url],
+                check=False,
+            )
+            return
 
         subprocess.run(["open", url], check=False)
 
