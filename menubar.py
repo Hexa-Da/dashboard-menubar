@@ -66,6 +66,9 @@ UPDATE_INTERVAL: int = 120  # secondes entre deux fetch gws (collecte des donné
 # Horloge monotonic dans _check_notifications (pas de NSTimer dédié).
 AUTH_REMIND_INTERVAL: int = 30 * 60
 AUTH_NOTIF_PREFIX: str = "gws-auth-"
+# Rappel notif si la collecte périodique échoue (subprocess / PermissionError).
+UPDATE_FAIL_REMIND_INTERVAL: int = 30 * 60
+UPDATE_FAIL_NOTIF_PREFIX: str = "update-fail-"
 # Nb max de ticks de refresh pendant lesquels on diffère une notif mail en
 # attendant le résumé IA. Garde-fou : au-delà, on notifie quand même
 # (si Azure OpenAI échoue, ne jamais notifier serait pire). ~2 min à 10 s/tick.
@@ -128,6 +131,26 @@ def _open_update_log() -> TextIO:
         os.replace(UPDATE_LOG, f"{UPDATE_LOG}.1")
 
     return open(UPDATE_LOG, "a", encoding="utf-8")
+
+
+def _run_update_script(logf: TextIO) -> tuple[str, str]:
+    """Lance `dashboard_update.py` ; retourne (`ok`|`error`, message).
+
+    Précondition : `logf` ouvert en append (journal de collecte).
+    Invariant : returncode 0 → (`ok`, "") ; sinon (`error`, détail tronqué).
+    """
+    try:
+        proc = subprocess.run(
+            [sys.executable, UPDATE_SCRIPT],
+            stdout=logf,
+            stderr=logf,
+            timeout=150,
+        )
+    except Exception as exc:
+        return "error", str(exc)[:150]
+    if proc.returncode == 0:
+        return "ok", ""
+    return "error", f"dashboard_update.py exit {proc.returncode}"
 
 
 def _open_in_browser(url: str) -> Callable[[object], None]:
@@ -315,6 +338,10 @@ class DashboardMenubar(rumps.App):
         # Ancre monotonic du dernier rappel auth (amorce ou deliver) ;
         # None = pas encore amorcé. Immune aux reset NSTimer wake/recover.
         self._auth_remind_anchor: Optional[float] = None
+        # Collecte périodique en échec : sticky + rappel (cf. auth gws).
+        self._update_collect_failed: bool = False
+        self._update_fail_remind_anchor: Optional[float] = None
+        self._update_last_fail_msg: str = ""
 
         # Notifications natives par source (cf. mac_notify) :
         #  Une seule notification par source (gmail-current / zimbra-current) pour
@@ -547,26 +574,72 @@ class DashboardMenubar(rumps.App):
         )
         self._auth_remind_anchor = time.monotonic()
 
+    def _deliver_update_fail_notif(self, message: str) -> None:
+        """Notif sticky « collecte en échec » (1er échec ou rappel 30 min).
+
+        Précondition : main thread. Id horodaté + son (même motif que auth).
+        """
+        detail: str = (message or "Collecte impossible").strip()[:150]
+        mac_notify.remove_prefix(UPDATE_FAIL_NOTIF_PREFIX)
+        stamp: str = time.strftime("%H:%M")
+        mac_notify.deliver(
+            f"{UPDATE_FAIL_NOTIF_PREFIX}{int(time.time())}",
+            "⚠️ Collecte dashboard en échec",
+            detail,
+            f"Dashboard menubar · {stamp}",
+            sound=True,
+        )
+        self._update_collect_failed = True
+        self._update_last_fail_msg = detail
+        self._update_fail_remind_anchor = time.monotonic()
+
+    def _clear_update_fail_notif(self) -> None:
+        """Retire les notifs collecte en échec (main thread)."""
+        mac_notify.remove_prefix(UPDATE_FAIL_NOTIF_PREFIX)
+        self._update_collect_failed = False
+        self._update_fail_remind_anchor = None
+        self._update_last_fail_msg = ""
+
+    def _note_update_collect_result(self, status: str, err_msg: str = "") -> None:
+        """Applique le résultat d'une collecte sur l'état sticky (main thread).
+
+        Premier échec → bannière ; échecs suivants → rappel via refresh.
+        Succès → clear.
+        """
+        if status == "ok":
+            self._clear_update_fail_notif()
+            return
+        first_failure: bool = not self._update_collect_failed
+        self._update_collect_failed = True
+        self._update_last_fail_msg = (err_msg or "Collecte impossible").strip()[:150]
+        if first_failure:
+            self._deliver_update_fail_notif(self._update_last_fail_msg)
+
     def _run_update_once(self) -> None:
         """Exécute dashboard_update.py en arrière-plan, un seul à la fois.
 
         Le fetch gws/Azure est lent (jusqu'à ~2 min) : il ne doit JAMAIS
         tourner sur le thread principal. Le verrou évite les chevauchements
-        (tick périodique + réveil)."""
+        (tick périodique + réveil). Échec (returncode / exception) → notif
+        sticky via `_note_update_collect_result` sur le main thread.
+        """
         if not self._update_lock.acquire(blocking=False):
             return  # un fetch est déjà en cours
 
         def _go() -> None:
+            status: str = "error"
+            err_msg: str = ""
             try:
                 with _open_update_log() as logf:
-                    subprocess.run(
-                        [sys.executable, UPDATE_SCRIPT],
-                        stdout=logf, stderr=logf, timeout=150,
-                    )
-            except Exception:
-                pass
+                    status, err_msg = _run_update_script(logf)
+            except Exception as exc:
+                status = "error"
+                err_msg = str(exc)[:150]
             finally:
                 self._update_lock.release()
+            self._run_on_main(
+                lambda: self._note_update_collect_result(status, err_msg)
+            )
 
         threading.Thread(target=_go, daemon=True).start()
 
@@ -809,7 +882,7 @@ class DashboardMenubar(rumps.App):
 
         `restore_btn` : \"gmail\" | \"zimbra\" | \"mark_gmail\" | \"mark_zimbra\" | \"force\".
         Succès : notif uniquement pour \"force\" ; mark/trash = refresh silencieux.
-        Erreurs : toujours notifiées.
+        Erreurs : toujours notifiées (y compris returncode ≠ 0).
         """
         status: str = "ok"
         err_msg: str = ""
@@ -820,10 +893,7 @@ class DashboardMenubar(rumps.App):
             else:
                 try:
                     with _open_update_log() as logf:
-                        subprocess.run(
-                            [sys.executable, UPDATE_SCRIPT],
-                            stdout=logf, stderr=logf, timeout=150,
-                        )
+                        status, err_msg = _run_update_script(logf)
                 finally:
                     self._update_lock.release()
         except Exception as exc:
@@ -853,7 +923,9 @@ class DashboardMenubar(rumps.App):
                     "⚠️ Erreur mise à jour",
                     err_msg,
                 )
+                self._note_update_collect_result("error", err_msg)
             else:
+                self._note_update_collect_result("ok")
                 if restore_btn == "force":
                     mac_notify.deliver(
                         "update-status",
@@ -993,14 +1065,21 @@ class DashboardMenubar(rumps.App):
         total_shown: int = gmail_shown + zimbra_shown
         self.title = str(total_shown) if total_shown > 0 else ""
         last_upd: str = str(data.get("last_updated", ""))
+        json_age: Optional[float] = self._dashboard_json_age_seconds()
+        stale_or_fail: bool = self._update_collect_failed or (
+            json_age is not None and json_age > STALE_DATA_SECONDS
+        )
         if last_upd:
             try:
                 dt_upd: datetime = datetime.fromisoformat(last_upd)
-                self.last_updated_btn.title = f"Dernière mise à jour : {dt_upd.strftime('%H:%M')}"
+                upd_title: str = f"Dernière mise à jour : {dt_upd.strftime('%H:%M')}"
             except (ValueError, TypeError):
-                self.last_updated_btn.title = "Dernière mise à jour : —"
+                upd_title = "Dernière mise à jour : —"
         else:
-            self.last_updated_btn.title = "Dernière mise à jour : —"
+            upd_title = "Dernière mise à jour : —"
+        if stale_or_fail:
+            upd_title += " ⚠️"
+        self.last_updated_btn.title = upd_title
 
         # Activer Marquer lu / Corbeille seulement s'il y a une vedette avec id
         # (ne pas toucher aux boutons pendant une action en cours).
@@ -1130,6 +1209,8 @@ class DashboardMenubar(rumps.App):
         sur transition ; rappel via ancre monotonic toutes les
         AUTH_REMIND_INTERVAL s si l'erreur persiste (online). Ids
         `gws-auth-<epoch>` + son pour forcer une alerte visible.
+        Collecte : rappel `update-fail-<epoch>` si `_update_collect_failed`
+        (échec subprocess) toutes les UPDATE_FAIL_REMIND_INTERVAL s.
         """
         gmail_ids: set[str] = {str(x) for x in data.get("unread_gmail_ids", []) if x}
         zimbra_ids: set[str] = {str(x) for x in data.get("unread_zimbra_ids", []) if x}
@@ -1222,6 +1303,16 @@ class DashboardMenubar(rumps.App):
             and (time.monotonic() - self._auth_remind_anchor) >= AUTH_REMIND_INTERVAL
         ):
             self._deliver_gws_auth_notif()
+
+        if (
+            self._update_collect_failed
+            and self._update_fail_remind_anchor is not None
+            and (time.monotonic() - self._update_fail_remind_anchor)
+            >= UPDATE_FAIL_REMIND_INTERVAL
+        ):
+            self._deliver_update_fail_notif(
+                self._update_last_fail_msg or "Collecte impossible"
+            )
 
 if __name__ == "__main__":
     _hide_dock_icon()
