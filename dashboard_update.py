@@ -9,7 +9,7 @@ Collecte :
 Écrit le résultat dans dashboard.json, puis lance summarize_mail.py si un
 dernier mail (Gmail ou Zimbra) n'a pas encore de résumé Azure OpenAI.
 
-Lancé toutes les 2 min par menubar.py (ou manuellement pour test).
+Lancé toutes les 1 min par menubar.py (ou manuellement pour test).
 """
 
 import base64

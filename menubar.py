@@ -61,7 +61,7 @@ load_project_env()
 _SCRIPT_DIR: str = os.path.dirname(os.path.abspath(__file__))
 DATA_FILE: str = os.path.join(_SCRIPT_DIR, "dashboard.json")
 REFRESH_INTERVAL: int = 10  # secondes entre deux relectures du JSON
-UPDATE_INTERVAL: int = 120  # secondes entre deux fetch gws (collecte des données)
+UPDATE_INTERVAL: int = 60  # secondes entre deux fetch gws (collecte des données)
 # Rappel notif auth si gws_auth_status reste en erreur (amorce / redémarrage).
 # Horloge monotonic dans _check_notifications (pas de NSTimer dédié).
 AUTH_REMIND_INTERVAL: int = 30 * 60
@@ -153,29 +153,34 @@ def _run_update_script(logf: TextIO) -> tuple[str, str]:
     return "error", f"dashboard_update.py exit {proc.returncode}"
 
 
+def _open_url(url: str) -> None:
+    """Ouvre `url` dans le navigateur par défaut (chemin Firefox cold-start inclus)."""
+    target_url = NSURL.URLWithString_(url)
+    browser_url = NSWorkspace.sharedWorkspace().URLForApplicationToOpenURL_(
+        target_url
+    )
+    browser_bundle = NSBundle.bundleWithURL_(browser_url) if browser_url else None
+    bundle_id = browser_bundle.bundleIdentifier() if browser_bundle else None
+
+    if bundle_id == "org.mozilla.firefox" and not (
+        NSRunningApplication.runningApplicationsWithBundleIdentifier_(bundle_id)
+    ):
+        # Cold start via LaunchServices + URL en arg : profil OK, pas d'onglet vide.
+        # (Popen du binaire Mach-O cassait le chargement du profil Firefox.)
+        subprocess.run(
+            ["open", "-b", bundle_id, "--args", url],
+            check=False,
+        )
+        return
+
+    subprocess.run(["open", url], check=False)
+
+
 def _open_in_browser(url: str) -> Callable[[object], None]:
     """Retourne un callback rumps qui ouvre `url` dans le navigateur par défaut."""
 
     def _handler(_: object) -> None:
-        target_url = NSURL.URLWithString_(url)
-        browser_url = NSWorkspace.sharedWorkspace().URLForApplicationToOpenURL_(
-            target_url
-        )
-        browser_bundle = NSBundle.bundleWithURL_(browser_url) if browser_url else None
-        bundle_id = browser_bundle.bundleIdentifier() if browser_bundle else None
-
-        if bundle_id == "org.mozilla.firefox" and not (
-            NSRunningApplication.runningApplicationsWithBundleIdentifier_(bundle_id)
-        ):
-            # Cold start via LaunchServices + URL en arg : profil OK, pas d'onglet vide.
-            # (Popen du binaire Mach-O cassait le chargement du profil Firefox.)
-            subprocess.run(
-                ["open", "-b", bundle_id, "--args", url],
-                check=False,
-            )
-            return
-
-        subprocess.run(["open", url], check=False)
+        _open_url(url)
 
     return _handler
 
@@ -357,6 +362,8 @@ class DashboardMenubar(rumps.App):
         self._active_zimbra_body: str = ""
         self._notif_defer_zimbra: int = 0
         self._button_configured: bool = False
+        # Clic / Afficher sur notif mail|événement → page web générique.
+        mac_notify.set_activation_handler(self._on_notification_activate)
         self._update_lock: threading.Lock = threading.Lock()
         self._last_refresh_tick_at: float = time.monotonic()
         self._trash_gmail_busy: bool = False
@@ -555,6 +562,20 @@ class DashboardMenubar(rumps.App):
     def _on_update_tick(self, _: object) -> None:
         """Tick du timer d'update (main thread) → lance un fetch en fond."""
         self._run_update_once()
+
+    def _on_notification_activate(self, identifier: str) -> None:
+        """Clic / Afficher sur une notif → page web générique (même URLs que le menu).
+
+        Ids hors mapping (auth, collecte, update-status) : no-op volontaire.
+        """
+        url_by_id: dict[str, str] = {
+            "gmail-current": URL_GMAIL,
+            "zimbra-current": URL_ZIMBRA,
+            "event-current": URL_GOOGLE_CALENDAR,
+        }
+        url: Optional[str] = url_by_id.get(identifier)
+        if url:
+            _open_url(url)
 
     def _deliver_gws_auth_notif(self) -> None:
         """Notif sticky « token Google expiré » (transition ou rappel 30 min).
@@ -1175,7 +1196,7 @@ class DashboardMenubar(rumps.App):
 
             # Émission (résumé prêt, ou pas de résumé attendu, ou garde-fou atteint).
             title, subtitle, message = _mail_notification_content(source_label, latest)
-            mac_notify.deliver(notif_id, title, message, subtitle)
+            mac_notify.deliver(notif_id, title, message, subtitle, actionable=True)
             seen.update(new_ids)
             emitted_id: str = latest_id or next(iter(new_ids))
             return emitted_id, subtitle, 0
@@ -1194,7 +1215,9 @@ class DashboardMenubar(rumps.App):
         ):
             title, subtitle, message = _mail_notification_content(source_label, latest)
             if subtitle != last_body:
-                mac_notify.deliver(notif_id, title, message, subtitle)
+                mac_notify.deliver(
+                    notif_id, title, message, subtitle, actionable=True
+                )
                 return active_id, subtitle, 0
 
         return active_id, last_body, defer_count
@@ -1271,6 +1294,7 @@ class DashboardMenubar(rumps.App):
                     "📅 Prochain événement",
                     title,
                     format_event_time(start, end) if start else "",
+                    actionable=True,
                 )
             self._prev_event_key = event_key
         else:

@@ -19,15 +19,116 @@ Prérequis : `pip install pyobjc-framework-Cocoa`.
 Précondition d'appel : main thread uniquement (le centre n'est pas thread-safe).
 """
 
-from typing import Optional
+from typing import Callable, Optional
+import os
+import time
 
 from Foundation import (
     NSBundle,
+    NSObject,
     NSUserNotification,
     NSUserNotificationCenter,
 )
 
 _BUNDLE_ID: str = "com.dashboard.menubar"
+_SCRIPT_DIR: str = os.path.dirname(os.path.abspath(__file__))
+_ACTIVATE_LOG: str = os.path.join(_SCRIPT_DIR, "logs", "notif-activate.log")
+
+# NSUserNotificationActivationType* (API dépréciée, constantes numériques stables).
+_ACTIVATION_NONE: int = 0
+_ACTIVATION_CONTENTS_CLICKED: int = 1
+_ACTIVATION_ACTION_BUTTON_CLICKED: int = 2
+
+# Retenus explicitement : le centre ne garde qu'une référence faible au délégué.
+_activation_handler: Optional[Callable[[str], None]] = None
+_delegate_ref: Optional[NSObject] = None
+
+
+def _log_activate(line: str) -> None:
+    """Append diagnostic (clic notif) — no-op si logs/ absent / non inscriptible."""
+    try:
+        os.makedirs(os.path.dirname(_ACTIVATE_LOG), exist_ok=True)
+        with open(_ACTIVATE_LOG, "a", encoding="utf-8") as f:
+            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {line}\n")
+    except OSError:
+        pass
+
+
+class _ActivationDelegate(NSObject):
+    """Délégué Cocoa : clic corps ou bouton d'action → handler Python."""
+
+    def userNotificationCenter_shouldPresentNotification_(  # noqa: N802
+        self, center, notification  # type: ignore[no-untyped-def]
+    ) -> bool:
+        return True
+
+    def userNotificationCenter_didActivateNotification_(  # noqa: N802
+        self, center, notification  # type: ignore[no-untyped-def]
+    ) -> None:
+        ident = ""
+        activation = -1
+        try:
+            raw_id = notification.identifier()
+            ident = str(raw_id) if raw_id else ""
+            activation = int(notification.activationType())
+        except (AttributeError, TypeError, ValueError) as exc:
+            _log_activate(f"activate_error err={exc!r}")
+            return
+
+        _log_activate(f"activate id={ident!r} type={activation}")
+
+        # type 0 = None (pas un vrai clic utile) ; le reste (1/2/autres) → handler.
+        if activation == _ACTIVATION_NONE:
+            return
+
+        handler = _activation_handler
+        if handler is None:
+            _log_activate("activate_ignored no_handler")
+            return
+        if not ident:
+            _log_activate("activate_ignored empty_id")
+            return
+        try:
+            handler(ident)
+            _log_activate(f"handler_ok id={ident!r}")
+        except Exception as exc:  # noqa: BLE001 — log diagnostic, ne pas crasher Cocoa
+            _log_activate(f"handler_error id={ident!r} err={exc!r}")
+
+
+def set_activation_handler(
+    handler: Optional[Callable[[str], None]],
+) -> bool:
+    """Branche (ou retire) le callback au clic / bouton d'action.
+
+    Précondition : main thread. `handler` reçoit l'`identifier` de la notif
+    activée. Passer `None` pour désinstaller. Retour : False si le centre
+    est indisponible.
+    """
+    global _activation_handler, _delegate_ref
+    center: Optional[NSUserNotificationCenter] = _center()
+    if center is None:
+        _log_activate("set_handler center_unavailable")
+        return False
+    _activation_handler = handler
+    if handler is None:
+        center.setDelegate_(None)
+        _delegate_ref = None
+        _log_activate("set_handler cleared")
+        return True
+    if _delegate_ref is None:
+        _delegate_ref = _ActivationDelegate.alloc().init()
+    center.setDelegate_(_delegate_ref)
+    _log_activate("set_handler installed")
+    return True
+
+
+def _ensure_delegate_bound(center: NSUserNotificationCenter) -> None:
+    """Ré-applique le délégué (défense si quelque chose l'a écrasé)."""
+    if _activation_handler is None:
+        return
+    if _delegate_ref is None:
+        return
+    center.setDelegate_(_delegate_ref)
 
 
 def _ensure_bundle_id() -> None:
@@ -64,6 +165,7 @@ def deliver(
     subtitle: str = "",
     *,
     sound: bool = False,
+    actionable: bool = False,
 ) -> bool:
     """Affiche une notification portant `identifier` (unique, pour suppression).
 
@@ -71,18 +173,24 @@ def deliver(
     main thread (le centre de notifications n'est pas thread-safe).
     `sound` : joue le son système par défaut (aide à attirer l'attention quand
     macOS livre la notif au Centre sans bannière).
+    `actionable` : bouton d'action explicite « Ouvrir » (le libellé système
+    « Afficher » n'appelle pas toujours le délégué sur les bannières Python).
     Retour : True si remise au centre, False si le centre est indisponible
     (process sans bundle utilisable, p. ex.).
     """
     center: Optional[NSUserNotificationCenter] = _center()
     if center is None:
         return False
+    _ensure_delegate_bound(center)
     notif: NSUserNotification = NSUserNotification.alloc().init()
     notif.setIdentifier_(identifier)
     notif.setTitle_(title)
     if subtitle:
         notif.setSubtitle_(subtitle)
     notif.setInformativeText_(message)
+    if actionable:
+        notif.setHasActionButton_(True)
+        notif.setActionButtonTitle_("Ouvrir")
     if sound:
         # Constante Cocoa ; string acceptée aussi par setSoundName_.
         notif.setSoundName_("NSUserNotificationDefaultSoundName")
@@ -142,25 +250,43 @@ def remove_all() -> None:
 
 
 def _selftest() -> None:
-    """Test manuel : émet une notif, attend, puis la retire.
+    """Test manuel : notif actionable ; cliquer « Ouvrir » puis Ctrl-C.
 
-    Lancer avec `python mac_notify.py` et observer le centre de notifications.
+    Lancer : `venv/bin/python3 mac_notify.py`
+    Observer `logs/notif-activate.log` et l'ouverture du navigateur.
     """
-    import time
+    import subprocess
 
+    from AppKit import NSApplication, NSApplicationActivationPolicyAccessory
+    from PyObjCTools import AppHelper
+
+    NSApplication.sharedApplication().setActivationPolicy_(
+        NSApplicationActivationPolicyAccessory
+    )
+
+    def _on_activate(ident: str) -> None:
+        print(f"handler called: {ident}")
+        subprocess.run(
+            ["open", "https://mail.google.com/mail/u/0/#inbox"],
+            check=False,
+        )
+
+    ok_handler: bool = set_activation_handler(_on_activate)
+    print(f"set_activation_handler -> {ok_handler}")
     ok: bool = deliver(
-        "selftest-1",
-        title="Test mac_notify",
-        message="Cette notification doit disparaître dans 4 s.",
+        "selftest-click",
+        title="Test clic mac_notify",
+        message="Cliquer « Ouvrir » (pas seulement Afficher). Ctrl-C pour quitter.",
         subtitle="Selftest",
+        actionable=True,
     )
     print(f"deliver -> {ok}")
     if not ok:
         print("Centre indisponible : bundle id non pris en compte ?")
         return
-    time.sleep(4)
-    remove("selftest-1")
-    print("remove -> notification retirée (vérifie le centre).")
+    print(f"Log: {_ACTIVATE_LOG}")
+    print("En attente du clic (run loop)…")
+    AppHelper.runConsoleEventLoop()
 
 
 if __name__ == "__main__":

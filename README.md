@@ -14,14 +14,14 @@ Une app macOS qui vit dans la barre de menus et affiche en un coup d'oeil :
 
 ```
 menubar.py (toujours actif via LaunchAgent)
-   ├──(toutes les 2 min)── dashboard_update.py ──> dashboard.json
+   ├──(toutes les 1 min)── dashboard_update.py ──> dashboard.json
    │                            ├── gws ── Calendar + Gmail
    │                            ├── zimbra_unread (IMAP, .env) ── Zimbra UL
    │                            └── summarize_mail.py ── Azure OpenAI (Gmail + Zimbra)
    └──(toutes les 10 s)── lit dashboard.json ──> barre de menus + badge (Gmail+Zimbra)
 ```
 
-- **`menubar.py`** est le chef d'orchestre : un seul process, maintenu en vie par un LaunchAgent (`KeepAlive`). Il déclenche la collecte toutes les 2 min, relit `dashboard.json` toutes les 10 s, affiche Gmail et Zimbra en sections distinctes, et le chiffre sur la cloche = **Gmail + Zimbra**.
+- **`menubar.py`** est le chef d'orchestre : un seul process, maintenu en vie par un LaunchAgent (`KeepAlive`). Il déclenche la collecte toutes les 1 min, relit `dashboard.json` toutes les 10 s, affiche Gmail et Zimbra en sections distinctes, et le chiffre sur la cloche = **Gmail + Zimbra**.
 - **`load_env.py`** charge le fichier `.env` au démarrage (stdlib, pas de dépendance `python-dotenv`).
 - **`dashboard_update.py`** appelle les APIs Google Calendar et Gmail via [`gws`](https://github.com/nicholasgasior/gws), interroge Zimbra via IMAP, et écrit le résultat dans `dashboard.json` à la racine du projet.
 - **`gws_errors.py`** détecte les échecs OAuth de gws (token révoqué, `invalid_grant`, credentials absents) à partir de la sortie du CLI.
@@ -69,7 +69,7 @@ python3 menubar.py
 
 L'app tourne via un **seul LaunchAgent** macOS (`~/Library/LaunchAgents/`) :
 
-- `com.paulantoine.dashboard-menubar.plist` — maintient `menubar.py` en vie (`KeepAlive`). Le menubar déclenche lui-même `dashboard_update.py` toutes les 2 minutes.
+- `com.paulantoine.dashboard-menubar.plist` — maintient `menubar.py` en vie (`KeepAlive`). Le menubar déclenche lui-même `dashboard_update.py` toutes les 1 minute.
 
 ```bash
 launchctl load ~/Library/LaunchAgents/com.paulantoine.dashboard-menubar.plist
