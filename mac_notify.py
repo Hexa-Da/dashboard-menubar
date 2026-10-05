@@ -173,8 +173,9 @@ def deliver(
     main thread (le centre de notifications n'est pas thread-safe).
     `sound` : joue le son système par défaut (aide à attirer l'attention quand
     macOS livre la notif au Centre sans bannière).
-    `actionable` : bouton d'action explicite « Ouvrir » (le libellé système
-    « Afficher » n'appelle pas toujours le délégué sur les bannières Python).
+    `actionable` : bouton d'action explicite « Ouvrir » ; sinon
+    `hasActionButton=False` pour tenter de masquer le « Afficher » par défaut
+    (un chrome système peut rester hors API).
     Retour : True si remise au centre, False si le centre est indisponible
     (process sans bundle utilisable, p. ex.).
     """
@@ -191,6 +192,9 @@ def deliver(
     if actionable:
         notif.setHasActionButton_(True)
         notif.setActionButtonTitle_("Ouvrir")
+    else:
+        # Défaut Cocoa = YES (« Afficher ») ; on le coupe pour les notifs info.
+        notif.setHasActionButton_(False)
     if sound:
         # Constante Cocoa ; string acceptée aussi par setSoundName_.
         notif.setSoundName_("NSUserNotificationDefaultSoundName")
