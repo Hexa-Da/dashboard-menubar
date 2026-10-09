@@ -46,9 +46,9 @@ def auth_status_indicates_error(payload: dict) -> bool:
 
     Invariant : absence de preuve (champs manquants) → False (indécis),
     pour ne pas court-circuiter la collecte sur un statut ambigu.
+    `token_valid: false` seul = access token stale (gws peut refresh via
+    les APIs) → False ; ne pas traiter comme login requis.
     """
-    if payload.get("token_valid") is False:
-        return True
     # Existence credentials : seulement si gws a fourni au moins un des champs.
     if (
         "encrypted_credentials_exists" in payload
