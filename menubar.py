@@ -18,6 +18,7 @@ Prérequis : `pip install rumps pyobjc-framework-Cocoa`.
 import json
 import os
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -83,6 +84,12 @@ STALE_DATA_SECONDS: int = UPDATE_INTERVAL + 60  # JSON trop vieux → fetch
 STALE_TICK_SECONDS: int = 45  # refresh timer (10 s) n'a pas tiré → recovery
 STALE_RESTART_SECONDS: int = 180  # recovery inefficace → redémarrage KeepAlive
 UPDATE_LOCK_TIMEOUT: int = 160  # secondes (aligné timeout subprocess + marge)
+# Warmup post-veille : probe TCP sortant avant première collecte / notifs auth.
+WAKE_SETUP_DEADLINE: float = 40.0
+WAKE_PROBE_TIMEOUT: float = 1.5
+WAKE_PROBE_INTERVAL: float = 2.0
+WAKE_PROBE_HOST: str = "1.1.1.1"
+WAKE_PROBE_PORT: int = 443
 ICON_BELL: str = os.path.join(_SCRIPT_DIR, "assets", "bell.png")
 ICON_MENUBAR_HEIGHT: float = 21.0  # hauteur cible ; la largeur suit le ratio du PNG
 
@@ -105,6 +112,19 @@ def _hide_dock_icon() -> None:
     """Masque l'icône Python dans le Dock ; l'icône menubar reste visible."""
     ns_app: NSApplication = NSApplication.sharedApplication()
     ns_app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
+
+
+def _network_outbound_ok(
+    host: str = WAKE_PROBE_HOST,
+    port: int = WAKE_PROBE_PORT,
+    timeout: float = WAKE_PROBE_TIMEOUT,
+) -> bool:
+    """True si une connexion TCP sortante vers host:port réussit."""
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
 
 
 def _open_update_log() -> TextIO:
@@ -366,6 +386,9 @@ class DashboardMenubar(rumps.App):
         mac_notify.set_activation_handler(self._on_notification_activate)
         self._update_lock: threading.Lock = threading.Lock()
         self._last_refresh_tick_at: float = time.monotonic()
+        # Post-veille : False jusqu'au probe réseau OK (ou deadline).
+        self._wake_ready: bool = True
+        self._wake_setup_gen: int = 0
         self._trash_gmail_busy: bool = False
         self._trash_zimbra_busy: bool = False
         self._mark_gmail_busy: bool = False
@@ -583,7 +606,10 @@ class DashboardMenubar(rumps.App):
         Id horodaté + son : même identifier + même texte ne re-affiche
         souvent pas de bannière sous NSUserNotification (notifs livrées
         silencieusement au Centre uniquement).
+        No-op pendant warmup réveil (alertes setup silencieuses).
         """
+        if not self._wake_ready:
+            return
         mac_notify.remove_prefix(AUTH_NOTIF_PREFIX)
         stamp: str = time.strftime("%H:%M")
         mac_notify.deliver(
@@ -599,7 +625,10 @@ class DashboardMenubar(rumps.App):
         """Notif sticky « collecte en échec » (1er échec ou rappel 30 min).
 
         Précondition : main thread. Id horodaté + son (même motif que auth).
+        No-op pendant warmup réveil (alertes setup silencieuses).
         """
+        if not self._wake_ready:
+            return
         detail: str = (message or "Collecte impossible").strip()[:150]
         mac_notify.remove_prefix(UPDATE_FAIL_NOTIF_PREFIX)
         stamp: str = time.strftime("%H:%M")
@@ -625,7 +654,7 @@ class DashboardMenubar(rumps.App):
         """Applique le résultat d'une collecte sur l'état sticky (main thread).
 
         Premier échec → bannière ; échecs suivants → rappel via refresh.
-        Succès → clear.
+        Succès → clear. Pendant warmup réveil : mémoriser sans bannière.
         """
         if status == "ok":
             self._clear_update_fail_notif()
@@ -633,7 +662,7 @@ class DashboardMenubar(rumps.App):
         first_failure: bool = not self._update_collect_failed
         self._update_collect_failed = True
         self._update_last_fail_msg = (err_msg or "Collecte impossible").strip()[:150]
-        if first_failure:
+        if first_failure and self._wake_ready:
             self._deliver_update_fail_notif(self._update_last_fail_msg)
 
     def _run_update_once(self) -> None:
@@ -643,7 +672,10 @@ class DashboardMenubar(rumps.App):
         tourner sur le thread principal. Le verrou évite les chevauchements
         (tick périodique + réveil). Échec (returncode / exception) → notif
         sticky via `_note_update_collect_result` sur le main thread.
+        No-op pendant le warmup post-veille (`_wake_ready` False).
         """
+        if not self._wake_ready:
+            return
         if not self._update_lock.acquire(blocking=False):
             return  # un fetch est déjà en cours
 
@@ -667,13 +699,56 @@ class DashboardMenubar(rumps.App):
     def _on_wake(self) -> None:
         """Réveil du Mac (event rumps `on_wake`).
 
-        Après une veille, les NSTimer peuvent ne plus tirer → on les relance,
-        on rafraîchit l'affichage et on déclenche un fetch immédiat pour ne
-        pas rater de nouveaux mails. Indispensable car le Mac fait de
-        fréquents « Maintenance Sleep »."""
+        Après une veille, les NSTimer peuvent ne plus tirer → on les relance
+        et on rafraîchit l'UI. La collecte attend le warmup réseau
+        (`_wake_ready`) ; alertes setup (auth, collecte, offline/stale UI)
+        restent silencieuses jusqu'à la fin du setup.
+        """
+        self._wake_ready = False
+        self._wake_setup_gen += 1
+        gen: int = self._wake_setup_gen
+        # Retirer les bannières setup encore visibles (auth / collecte).
+        mac_notify.remove_prefix(AUTH_NOTIF_PREFIX)
+        mac_notify.remove_prefix(UPDATE_FAIL_NOTIF_PREFIX)
         self._start_refresh_timer()
         self._start_update_timer()
         self._on_refresh_tick(None)
+        threading.Thread(
+            target=self._wake_setup_worker,
+            args=(gen,),
+            daemon=True,
+            name="wake-setup",
+        ).start()
+
+    def _wake_setup_worker(self, gen: int) -> None:
+        """Probe TCP jusqu'à réseau OK ou deadline, puis finish sur main."""
+        deadline: float = time.monotonic() + WAKE_SETUP_DEADLINE
+        while time.monotonic() < deadline:
+            if gen != self._wake_setup_gen:
+                return
+            if _network_outbound_ok():
+                break
+            time.sleep(WAKE_PROBE_INTERVAL)
+        if gen != self._wake_setup_gen:
+            return
+        self._run_on_main(lambda: self._finish_wake_setup(gen))
+
+    def _finish_wake_setup(self, gen: int) -> None:
+        """Ouvre le gate post-veille et lance la première collecte (main thread)."""
+        if gen != self._wake_setup_gen:
+            return
+        self._wake_ready = True
+        # Ré-amorce alertes setup : pas de burst immédiat post-warmup.
+        data: dict = load_data()
+        auth_status: str = str(data.get("gws_auth_status", "ok"))
+        self._prev_gws_auth_status = auth_status
+        if auth_status == "auth_error":
+            self._auth_remind_anchor = time.monotonic()
+        else:
+            self._auth_remind_anchor = None
+            mac_notify.remove_prefix(AUTH_NOTIF_PREFIX)
+        if self._update_collect_failed:
+            self._update_fail_remind_anchor = time.monotonic()
         self._run_update_once()
 
     def _prevent_app_nap(self) -> None:
@@ -963,7 +1038,11 @@ class DashboardMenubar(rumps.App):
         Délègue au même script que la collecte périodique (dashboard_update.py)
         pour une logique unique et robuste, sous le verrou partagé (pas de
         collecte concurrente). Rafraîchit l'UI à la fin.
+        Annule un warmup post-veille en cours (utilisateur force l'ouverture
+        du gate).
         """
+        self._wake_ready = True
+        self._wake_setup_gen += 1
         self.force_update_btn.title = "Mise à jour en cours..."
         threading.Thread(target=self._force_update_worker, daemon=True).start()
 
@@ -984,8 +1063,20 @@ class DashboardMenubar(rumps.App):
     def _update_menu(self, data: dict) -> None:
         """Met à jour les libellés des MenuItems depuis `data`."""
         # Priorité d'affichage : offline > auth_error > error source.
-        offline: bool = data.get("connectivity") == "offline"
-        gws_auth_error: bool = (not offline) and data.get("gws_auth_status") == "auth_error"
+        # Warmup réveil : garder les compteurs, masquer ✈️/🔑/⚠️ setup.
+        show_setup_alerts: bool = self._wake_ready
+        offline: bool = show_setup_alerts and data.get("connectivity") == "offline"
+        gws_auth_error: bool = (
+            show_setup_alerts
+            and (not offline)
+            and data.get("gws_auth_status") == "auth_error"
+        )
+        gmail_source_error: bool = (
+            show_setup_alerts and data.get("gmail_status") == "error"
+        )
+        zimbra_source_error: bool = (
+            show_setup_alerts and data.get("zimbra_status") == "error"
+        )
         event: Optional[dict] = _extract_event(data)
         if event is None:
             cal_title: str = "📅 Aucun événement à venir"
@@ -1030,7 +1121,7 @@ class DashboardMenubar(rumps.App):
             gmail_title += " ✈️"
         elif gws_auth_error:
             gmail_title += " 🔑"
-        elif data.get("gmail_status") == "error":
+        elif gmail_source_error:
             gmail_title += " ⚠️"
         self.mail_gmail.title = gmail_title
 
@@ -1060,7 +1151,7 @@ class DashboardMenubar(rumps.App):
         )
         if offline:
             zimbra_title += " ✈️"
-        elif data.get("zimbra_status") == "error":
+        elif zimbra_source_error:
             zimbra_title += " ⚠️"
         self.mail_zimbra.title = zimbra_title
 
@@ -1087,8 +1178,9 @@ class DashboardMenubar(rumps.App):
         self.title = str(total_shown) if total_shown > 0 else ""
         last_upd: str = str(data.get("last_updated", ""))
         json_age: Optional[float] = self._dashboard_json_age_seconds()
-        stale_or_fail: bool = self._update_collect_failed or (
-            json_age is not None and json_age > STALE_DATA_SECONDS
+        stale_or_fail: bool = show_setup_alerts and (
+            self._update_collect_failed
+            or (json_age is not None and json_age > STALE_DATA_SECONDS)
         )
         if last_upd:
             try:
@@ -1302,34 +1394,38 @@ class DashboardMenubar(rumps.App):
                 mac_notify.remove("event-current")
             self._prev_event_key = None
 
-        auth_status: str = str(data.get("gws_auth_status", "ok"))
-        offline: bool = data.get("connectivity") == "offline"
-        if self._prev_gws_auth_status is None:
-            # Amorce : pas de notif au démarrage même si déjà auth_error.
-            self._prev_gws_auth_status = auth_status
-            if auth_status == "auth_error":
-                self._auth_remind_anchor = time.monotonic()
-        elif offline:
-            # Hors ligne : pas de notif auth (défense en profondeur).
-            # On mémorise quand même le statut pour éviter un burst au retour.
-            self._prev_gws_auth_status = auth_status
-        elif auth_status != self._prev_gws_auth_status:
-            if auth_status == "auth_error":
+        # Warmup réveil : pas de notif auth (ré-amorce dans _finish_wake_setup).
+        if self._wake_ready:
+            auth_status: str = str(data.get("gws_auth_status", "ok"))
+            offline: bool = data.get("connectivity") == "offline"
+            if self._prev_gws_auth_status is None:
+                # Amorce : pas de notif au démarrage même si déjà auth_error.
+                self._prev_gws_auth_status = auth_status
+                if auth_status == "auth_error":
+                    self._auth_remind_anchor = time.monotonic()
+            elif offline:
+                # Hors ligne : pas de notif auth (défense en profondeur).
+                # On mémorise quand même le statut pour éviter un burst au retour.
+                self._prev_gws_auth_status = auth_status
+            elif auth_status != self._prev_gws_auth_status:
+                if auth_status == "auth_error":
+                    self._deliver_gws_auth_notif()
+                elif self._prev_gws_auth_status == "auth_error":
+                    mac_notify.remove_prefix(AUTH_NOTIF_PREFIX)
+                    self._auth_remind_anchor = None
+                self._prev_gws_auth_status = auth_status
+            elif (
+                not offline
+                and auth_status == "auth_error"
+                and self._auth_remind_anchor is not None
+                and (time.monotonic() - self._auth_remind_anchor)
+                >= AUTH_REMIND_INTERVAL
+            ):
                 self._deliver_gws_auth_notif()
-            elif self._prev_gws_auth_status == "auth_error":
-                mac_notify.remove_prefix(AUTH_NOTIF_PREFIX)
-                self._auth_remind_anchor = None
-            self._prev_gws_auth_status = auth_status
-        elif (
-            not offline
-            and auth_status == "auth_error"
-            and self._auth_remind_anchor is not None
-            and (time.monotonic() - self._auth_remind_anchor) >= AUTH_REMIND_INTERVAL
-        ):
-            self._deliver_gws_auth_notif()
 
         if (
-            self._update_collect_failed
+            self._wake_ready
+            and self._update_collect_failed
             and self._update_fail_remind_anchor is not None
             and (time.monotonic() - self._update_fail_remind_anchor)
             >= UPDATE_FAIL_REMIND_INTERVAL
