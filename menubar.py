@@ -371,15 +371,19 @@ class DashboardMenubar(rumps.App):
         # Notifications natives par source (cf. mac_notify) :
         #  Une seule notification par source (gmail-current / zimbra-current) pour
         #  éviter l'empilement.  _seen_* garde les ids déjà vus (anti-re-notif) ;
-        #  _active_*_id est l'id du mail représenté dans la notif visible ("" = aucune).
+        #  _active_*_id est le mail du slot ("" = vacant → promouvoir le latest) ;
+        #  _*_banner_live : True seulement après un deliver réel (amorce sans
+        #  bannière ne doit pas déclencher de MAJ corps → deliver au 1er résumé).
         self._notif_initialized: bool = False
         self._seen_gmail_ids: set[str] = set()
         self._active_gmail_id: str = ""
         self._active_gmail_body: str = ""
+        self._gmail_banner_live: bool = False
         self._notif_defer_gmail: int = 0
         self._seen_zimbra_ids: set[str] = set()
         self._active_zimbra_id: str = ""
         self._active_zimbra_body: str = ""
+        self._zimbra_banner_live: bool = False
         self._notif_defer_zimbra: int = 0
         self._button_configured: bool = False
         # Clic / Afficher sur notif mail|événement → page web générique.
@@ -834,10 +838,11 @@ class DashboardMenubar(rumps.App):
             return
 
         def _marked() -> None:
-            if self._active_gmail_id:
-                mac_notify.remove("gmail-current")
-                self._active_gmail_id = ""
-                self._active_gmail_body = ""
+            # Retrait visuel immédiat ; garder _active_* pour que _sync
+            # détecte la sortie du mail et promeuve le suivant (évite
+            # de re-notifier le même mail tant que le JSON n'est pas à jour).
+            mac_notify.remove("gmail-current")
+            self._gmail_banner_live = False
 
         self._run_on_main(_marked)
         self._collect_after_action(restore_btn="mark_gmail")
@@ -873,10 +878,8 @@ class DashboardMenubar(rumps.App):
             return
 
         def _marked() -> None:
-            if self._active_zimbra_id:
-                mac_notify.remove("zimbra-current")
-                self._active_zimbra_id = ""
-                self._active_zimbra_body = ""
+            mac_notify.remove("zimbra-current")
+            self._zimbra_banner_live = False
 
         self._run_on_main(_marked)
         self._collect_after_action(restore_btn="mark_zimbra")
@@ -906,10 +909,8 @@ class DashboardMenubar(rumps.App):
             return
 
         def _trashed() -> None:
-            if self._active_gmail_id:
-                mac_notify.remove("gmail-current")
-                self._active_gmail_id = ""
-                self._active_gmail_body = ""
+            mac_notify.remove("gmail-current")
+            self._gmail_banner_live = False
 
         self._run_on_main(_trashed)
         self._collect_after_action(restore_btn="gmail")
@@ -945,10 +946,8 @@ class DashboardMenubar(rumps.App):
             return
 
         def _trashed() -> None:
-            if self._active_zimbra_id:
-                mac_notify.remove("zimbra-current")
-                self._active_zimbra_id = ""
-                self._active_zimbra_body = ""
+            mac_notify.remove("zimbra-current")
+            self._zimbra_banner_live = False
 
         self._run_on_main(_trashed)
         self._collect_after_action(restore_btn="zimbra")
@@ -1240,15 +1239,15 @@ class DashboardMenubar(rumps.App):
         active_id: str,
         last_body: str,
         defer_count: int,
+        banner_live: bool,
         latest: Optional[dict],
-    ) -> tuple[str, str, int]:
+    ) -> tuple[str, str, int, bool]:
         """Aligne la notification unique d'une source mail sur `current_ids`.
 
         Préconditions :
           - appelée depuis le main thread (mac_notify n'est pas thread-safe) ;
           - `seen` est muté EN PLACE.
-        Retour : `(active_id, last_body, defer_count)` — id/corps affichés et
-        nombre de ticks pendant lesquels on a différé l'émission.
+        Retour : `(active_id, last_body, defer_count, banner_live)`.
         Invariants :
           - une seule bannière par source (identifiant fixe `{prefix}-current`) ;
           - on NE notifie PAS un nouveau mail tant que son résumé IA n'est
@@ -1256,7 +1255,10 @@ class DashboardMenubar(rumps.App):
             jamais bloquer indéfiniment si le résumé n'arrive pas ;
           - tant qu'on diffère, les ids ne sont pas marqués « vus » (on réévalue
             au tick suivant) ;
-          - à la sortie d'une émission : `seen == current_ids`.
+          - à la sortie d'une émission : `seen == current_ids` ;
+          - si le mail actif quitte les non-lus (mark/trash/lecture externe),
+            le `latest` suivant est promu même s'il était déjà dans `seen`
+            (sinon la file d'attente ne re-notifie jamais).
         """
         new_ids: set[str] = current_ids - seen
 
@@ -1264,11 +1266,26 @@ class DashboardMenubar(rumps.App):
         seen.difference_update(seen - current_ids)
 
         notif_id: str = f"{prefix}-current"
+        latest_id: str = (
+            str(latest.get("id", "")).strip() if isinstance(latest, dict) else ""
+        )
 
-        if new_ids:
-            latest_id: str = (
-                str(latest.get("id", "")) if isinstance(latest, dict) else ""
-            )
+        # Slot obsolète : le mail représenté n'est plus non-lu → libérer, puis
+        # éventuellement promouvoir le featured suivant dans le même passage.
+        if active_id and active_id not in current_ids:
+            mac_notify.remove(notif_id)
+            active_id = ""
+            last_body = ""
+            banner_live = False
+            defer_count = 0
+
+        # Nouveaux ids, ou slot vacant avec un featured encore non-lu (file
+        # d'attente après mark/trash : le suivant était déjà dans seen).
+        promote: bool = bool(
+            not active_id and latest_id and latest_id in current_ids
+        )
+
+        if new_ids or promote:
             summary_ready: bool = (
                 isinstance(latest, dict) and bool(str(latest.get("summary", "")).strip())
             )
@@ -1277,49 +1294,48 @@ class DashboardMenubar(rumps.App):
             )
             # Un résumé est ATTENDU si le mail à afficher a du texte mais pas
             # encore de résumé (summarize_mail.py va le calculer sous peu).
-            summary_pending: bool = (
-                latest_id in new_ids and has_text and not summary_ready
+            candidate: bool = bool(latest_id) and (
+                latest_id in new_ids or promote
             )
+            summary_pending: bool = candidate and has_text and not summary_ready
 
             if summary_pending and defer_count < MAX_NOTIF_DEFER_TICKS:
                 # On diffère : ni émission, ni marquage « vu » → réévalué au tick
                 # suivant, où le résumé sera probablement disponible.
-                return active_id, last_body, defer_count + 1
+                return active_id, last_body, defer_count + 1, banner_live
 
             # Émission (résumé prêt, ou pas de résumé attendu, ou garde-fou atteint).
             title, subtitle, message = _mail_notification_content(source_label, latest)
             mac_notify.deliver(notif_id, title, message, subtitle, actionable=True)
-            seen.update(new_ids)
-            emitted_id: str = latest_id or next(iter(new_ids))
-            return emitted_id, subtitle, 0
-
-        # Aucun nouveau mail : retirer la bannière si le mail qu'elle représentait
-        # n'est plus non-lu (a été lu ailleurs).
-        if active_id and active_id not in current_ids:
-            mac_notify.remove(notif_id)
-            return "", "", 0
+            seen.update(current_ids)
+            emitted_id: str = latest_id or (next(iter(new_ids)) if new_ids else "")
+            return emitted_id, subtitle, 0, True
 
         # Résumé IA arrivé après une émission au garde-fou → MAJ du corps.
+        # (Pas de deliver si amorce sans bannière : banner_live=False.)
         if (
             active_id
             and isinstance(latest, dict)
-            and str(latest.get("id", "")) == active_id
+            and str(latest.get("id", "")).strip() == active_id
         ):
             title, subtitle, message = _mail_notification_content(source_label, latest)
             if subtitle != last_body:
-                mac_notify.deliver(
-                    notif_id, title, message, subtitle, actionable=True
-                )
-                return active_id, subtitle, 0
+                if banner_live:
+                    mac_notify.deliver(
+                        notif_id, title, message, subtitle, actionable=True
+                    )
+                return active_id, subtitle, 0, banner_live
 
-        return active_id, last_body, defer_count
+        return active_id, last_body, defer_count, banner_live
 
     def _check_notifications(self, data: dict) -> None:
         """Émet/retire les notifications mail, événement et auth gws.
 
         Invariant : au tout premier passage on AMORCE les id non lus déjà
         présents sans émettre de notification (évite un burst au démarrage) ;
-        les passages suivants délèguent à `_sync_mail_notifications`.
+        on peuple aussi `_active_*` sur le featured courant pour ne pas
+        le « promouvoir » au tick suivant ; les passages suivants délèguent
+        à `_sync_mail_notifications`.
         Auth gws : même amorce (mémoriser sans notif), puis deliver/remove
         sur transition ; rappel via ancre monotonic toutes les
         AUTH_REMIND_INTERVAL s si l'erreur persiste (online). Ids
@@ -1333,12 +1349,31 @@ class DashboardMenubar(rumps.App):
         if not self._notif_initialized:
             self._seen_gmail_ids = set(gmail_ids)
             self._seen_zimbra_ids = set(zimbra_ids)
+            latest_g: object = data.get("latest_unread")
+            if isinstance(latest_g, dict):
+                gid: str = str(latest_g.get("id", "")).strip()
+                if gid and gid in gmail_ids:
+                    self._active_gmail_id = gid
+                    _, self._active_gmail_body, _ = _mail_notification_content(
+                        "Gmail", latest_g
+                    )
+            latest_z: object = data.get("latest_unread_zimbra")
+            if isinstance(latest_z, dict):
+                zid: str = str(latest_z.get("id", "")).strip()
+                if zid and zid in zimbra_ids:
+                    self._active_zimbra_id = zid
+                    _, self._active_zimbra_body, _ = _mail_notification_content(
+                        "Zimbra", latest_z
+                    )
+            self._gmail_banner_live = False
+            self._zimbra_banner_live = False
             self._notif_initialized = True
         else:
             (
                 self._active_gmail_id,
                 self._active_gmail_body,
                 self._notif_defer_gmail,
+                self._gmail_banner_live,
             ) = self._sync_mail_notifications(
                 prefix="gmail",
                 source_label="Gmail",
@@ -1347,12 +1382,14 @@ class DashboardMenubar(rumps.App):
                 active_id=self._active_gmail_id,
                 last_body=self._active_gmail_body,
                 defer_count=self._notif_defer_gmail,
+                banner_live=self._gmail_banner_live,
                 latest=data.get("latest_unread"),
             )
             (
                 self._active_zimbra_id,
                 self._active_zimbra_body,
                 self._notif_defer_zimbra,
+                self._zimbra_banner_live,
             ) = self._sync_mail_notifications(
                 prefix="zimbra",
                 source_label="Zimbra",
@@ -1361,6 +1398,7 @@ class DashboardMenubar(rumps.App):
                 active_id=self._active_zimbra_id,
                 last_body=self._active_zimbra_body,
                 defer_count=self._notif_defer_zimbra,
+                banner_live=self._zimbra_banner_live,
                 latest=data.get("latest_unread_zimbra"),
             )
 
