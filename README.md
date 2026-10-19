@@ -102,7 +102,7 @@ Les suffixes sont ajoutés aux lignes **Calendar**, **Gmail** et **Zimbra** :
 | ⚠️ | `gmail_status` ou `zimbra_status` = `error` (et online) | Vérifier IMAP, API, ou logs (`dashboard_update.py` / stderr) |
 | 🔑 | `gws_auth_status` = `auth_error` (et online) | Reconnecter Google : `gws auth login`. Notif macOS (son) sur passage en erreur, puis rappel toutes les 30 min tant que l'erreur persiste (`gws-auth-<epoch>`, ancre monotonic) |
 
-`connectivity` est dérivé automatiquement à chaque collecte : `offline` si Gmail (et Zimbra si configuré) échouent sans preuve OAuth ; sinon `online`.
+`connectivity` est dérivé automatiquement à chaque collecte : `offline` si Gmail (et Zimbra si configuré) échouent, sauf preuve OAuth dure (pré-check credentials). Un `auth_error` soft/sticky ne bloque pas offline quand Zimbra échoue aussi.
 
 
 ## Structure

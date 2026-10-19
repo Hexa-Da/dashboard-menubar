@@ -76,17 +76,28 @@ def _derive_connectivity(
 ) -> str:
     """Dérive connectivity online/offline pour dashboard.json.
 
-    offline = chaque source active a échoué ET aucune preuve OAuth.
+    offline = chaque source active a échoué, sauf preuve OAuth *dure*.
     Sources actives : Gmail toujours ; Zimbra si configuré (pas disabled).
-    auth_error (pré-check ou marqueurs) → online (vrai diagnostic auth).
+
+    Preuve dure = pré-check `auth status` (credentials absents / pas de
+    refresh). Les marqueurs API / un `auth_error` collant du JSON précédent
+    ne bloquent pas offline quand Zimbra (hors Google) est aussi en échec :
+    une coupure réseau produit souvent des sorties gws « auth-like » ou
+    conserve un faux auth_error après timeouts.
+    Sans Zimbra actif : auth_error (marqueurs ou sticky) → online.
     """
-    if auth_precheck_error or gws_auth_status == "auth_error":
-        return "online"
     gmail_failed: bool = gmail_status == "error"
     zimbra_active: bool = zimbra_status != "disabled"
     zimbra_failed: bool = zimbra_status == "error"
     all_failed: bool = gmail_failed and (not zimbra_active or zimbra_failed)
-    return "offline" if all_failed else "online"
+    if not all_failed:
+        return "online"
+    # Échec croisé Gmail + Zimbra : le réseau prime sur un soft auth_error.
+    if zimbra_active and zimbra_failed and not auth_precheck_error:
+        return "offline"
+    if auth_precheck_error or gws_auth_status == "auth_error":
+        return "online"
+    return "offline"
 
 
 def main() -> None:
