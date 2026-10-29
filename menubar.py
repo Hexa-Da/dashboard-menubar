@@ -15,12 +15,12 @@ Les données sont lues depuis dashboard.json à la racine du projet
 Prérequis : `pip install rumps pyobjc-framework-Cocoa`.
 """
 
+import contextlib
 import json
 import os
 import signal
 import socket
 import subprocess
-import sys
 import threading
 import time
 from datetime import datetime, timedelta
@@ -43,6 +43,7 @@ from Foundation import (
     NSURL,
 )
 
+import dashboard_update
 import mac_notify
 from load_env import load_project_env
 from mail_trash import (
@@ -67,14 +68,13 @@ UPDATE_INTERVAL: int = 60  # secondes entre deux fetch gws (collecte des donnée
 # Horloge monotonic dans _check_notifications (pas de NSTimer dédié).
 AUTH_REMIND_INTERVAL: int = 30 * 60
 AUTH_NOTIF_PREFIX: str = "gws-auth-"
-# Rappel notif si la collecte périodique échoue (subprocess / PermissionError).
+# Rappel notif si la collecte périodique échoue (in-process).
 UPDATE_FAIL_REMIND_INTERVAL: int = 30 * 60
 UPDATE_FAIL_NOTIF_PREFIX: str = "update-fail-"
 # Nb max de ticks de refresh pendant lesquels on diffère une notif mail en
 # attendant le résumé IA. Garde-fou : au-delà, on notifie quand même
 # (si Azure OpenAI échoue, ne jamais notifier serait pire). ~2 min à 10 s/tick.
 MAX_NOTIF_DEFER_TICKS: int = 12
-UPDATE_SCRIPT: str = os.path.join(_SCRIPT_DIR, "dashboard_update.py")
 UPDATE_LOG: str = os.path.join(_SCRIPT_DIR, "logs", "dashboard-update.log")
 UPDATE_LOG_MAX_BYTES: int = 512 * 1024
 UPDATE_LOG_BACKUP_COUNT: int = 3
@@ -83,7 +83,7 @@ WATCHDOG_INTERVAL: int = 30  # secondes entre deux contrôles
 STALE_DATA_SECONDS: int = UPDATE_INTERVAL + 60  # JSON trop vieux → fetch
 STALE_TICK_SECONDS: int = 45  # refresh timer (10 s) n'a pas tiré → recovery
 STALE_RESTART_SECONDS: int = 180  # recovery inefficace → redémarrage KeepAlive
-UPDATE_LOCK_TIMEOUT: int = 160  # secondes (aligné timeout subprocess + marge)
+UPDATE_LOCK_TIMEOUT: int = 160  # secondes (bornes gws/IMAP/Azure + marge)
 # Warmup post-veille : probe TCP sortant avant première collecte / notifs auth.
 WAKE_SETUP_DEADLINE: float = 40.0
 WAKE_PROBE_TIMEOUT: float = 1.5
@@ -154,23 +154,18 @@ def _open_update_log() -> TextIO:
 
 
 def _run_update_script(logf: TextIO) -> tuple[str, str]:
-    """Lance `dashboard_update.py` ; retourne (`ok`|`error`, message).
+    """Exécute `dashboard_update.main()` in-process ; retourne (`ok`|`error`, message).
 
     Précondition : `logf` ouvert en append (journal de collecte).
-    Invariant : returncode 0 → (`ok`, "") ; sinon (`error`, détail tronqué).
+    Invariant : succès sans exception → (`ok`, "") ; sinon (`error`, détail tronqué).
+    Pas de second interpréteur venv (évite PermissionError TCC sous Documents).
     """
     try:
-        proc = subprocess.run(
-            [sys.executable, UPDATE_SCRIPT],
-            stdout=logf,
-            stderr=logf,
-            timeout=150,
-        )
+        with contextlib.redirect_stdout(logf), contextlib.redirect_stderr(logf):
+            dashboard_update.main()
     except Exception as exc:
         return "error", str(exc)[:150]
-    if proc.returncode == 0:
-        return "ok", ""
-    return "error", f"dashboard_update.py exit {proc.returncode}"
+    return "ok", ""
 
 
 def _open_url(url: str) -> None:
@@ -670,12 +665,12 @@ class DashboardMenubar(rumps.App):
             self._deliver_update_fail_notif(self._update_last_fail_msg)
 
     def _run_update_once(self) -> None:
-        """Exécute dashboard_update.py en arrière-plan, un seul à la fois.
+        """Exécute la collecte in-process en arrière-plan, un seul à la fois.
 
         Le fetch gws/Azure est lent (jusqu'à ~2 min) : il ne doit JAMAIS
         tourner sur le thread principal. Le verrou évite les chevauchements
-        (tick périodique + réveil). Échec (returncode / exception) → notif
-        sticky via `_note_update_collect_result` sur le main thread.
+        (tick périodique + réveil). Échec (exception) → notif sticky via
+        `_note_update_collect_result` sur le main thread.
         No-op pendant le warmup post-veille (`_wake_ready` False).
         """
         if not self._wake_ready:
@@ -977,7 +972,7 @@ class DashboardMenubar(rumps.App):
 
         `restore_btn` : \"gmail\" | \"zimbra\" | \"mark_gmail\" | \"mark_zimbra\" | \"force\".
         Succès : notif uniquement pour \"force\" ; mark/trash = refresh silencieux.
-        Erreurs : toujours notifiées (y compris returncode ≠ 0).
+        Erreurs : toujours notifiées.
         """
         status: str = "ok"
         err_msg: str = ""
@@ -1034,9 +1029,9 @@ class DashboardMenubar(rumps.App):
     def force_update(self, _: object) -> None:
         """Force une collecte immédiate.
 
-        Délègue au même script que la collecte périodique (dashboard_update.py)
-        pour une logique unique et robuste, sous le verrou partagé (pas de
-        collecte concurrente). Rafraîchit l'UI à la fin.
+        Délègue à la même collecte in-process que le tick périodique,
+        sous le verrou partagé (pas de collecte concurrente). Rafraîchit
+        l'UI à la fin.
         Annule un warmup post-veille en cours (utilisateur force l'ouverture
         du gate).
         """
@@ -1341,7 +1336,7 @@ class DashboardMenubar(rumps.App):
         AUTH_REMIND_INTERVAL s si l'erreur persiste (online). Ids
         `gws-auth-<epoch>` + son pour forcer une alerte visible.
         Collecte : rappel `update-fail-<epoch>` si `_update_collect_failed`
-        (échec subprocess) toutes les UPDATE_FAIL_REMIND_INTERVAL s.
+        (échec collecte) toutes les UPDATE_FAIL_REMIND_INTERVAL s.
         """
         gmail_ids: set[str] = {str(x) for x in data.get("unread_gmail_ids", []) if x}
         zimbra_ids: set[str] = {str(x) for x in data.get("unread_zimbra_ids", []) if x}

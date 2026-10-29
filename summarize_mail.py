@@ -9,7 +9,8 @@ Lit dashboard.json et, pour chaque boîte sans résumé existant :
 Demande un résumé court à Azure OpenAI (chat completions) et écrit
 le champ `summary` dans le JSON.
 
-Appelé par dashboard_update.py après chaque collecte (ou manuellement).
+Appelé in-process par dashboard_update après chaque collecte
+(ou manuellement : `python summarize_mail.py`).
 """
 
 from __future__ import annotations

@@ -14,16 +14,16 @@ Une app macOS qui vit dans la barre de menus et affiche en un coup d'oeil :
 
 ```
 menubar.py (toujours actif via LaunchAgent)
-   ├──(toutes les 1 min)── dashboard_update.py ──> dashboard.json
+   ├──(toutes les 1 min, in-process)── dashboard_update.main() ──> dashboard.json
    │                            ├── gws ── Calendar + Gmail
    │                            ├── zimbra_unread (IMAP, .env) ── Zimbra UL
-   │                            └── summarize_mail.py ── Azure OpenAI (Gmail + Zimbra)
+   │                            └── summarize_mail.main() ── Azure OpenAI (Gmail + Zimbra)
    └──(toutes les 10 s)── lit dashboard.json ──> barre de menus + badge (Gmail+Zimbra)
 ```
 
-- **`menubar.py`** est le chef d'orchestre : un seul process, maintenu en vie par un LaunchAgent (`KeepAlive`). Il déclenche la collecte toutes les 1 min, relit `dashboard.json` toutes les 10 s, affiche Gmail et Zimbra en sections distinctes, et le chiffre sur la cloche = **Gmail + Zimbra**.
+- **`menubar.py`** est le chef d'orchestre : un seul process, maintenu en vie par un LaunchAgent (`KeepAlive`). Il déclenche la collecte in-process toutes les 1 min, relit `dashboard.json` toutes les 10 s, affiche Gmail et Zimbra en sections distinctes, et le chiffre sur la cloche = **Gmail + Zimbra**.
 - **`load_env.py`** charge le fichier `.env` au démarrage (stdlib, pas de dépendance `python-dotenv`).
-- **`dashboard_update.py`** appelle les APIs Google Calendar et Gmail via [`gws`](https://github.com/nicholasgasior/gws), interroge Zimbra via IMAP, et écrit le résultat dans `dashboard.json` à la racine du projet.
+- **`dashboard_update.py`** appelle les APIs Google Calendar et Gmail via [`gws`](https://github.com/nicholasgasior/gws), interroge Zimbra via IMAP, et écrit le résultat dans `dashboard.json` à la racine du projet (appelé in-process par le menubar ; aussi utilisable en CLI).
 - **`gws_errors.py`** détecte les échecs OAuth de gws (token révoqué, `invalid_grant`, credentials absents) à partir de la sortie du CLI.
 - **`zimbra_unread.py`** se connecte à la messagerie Zimbra de l'UL en IMAP (SSL, lecture seule), compte les non-lus et récupère le dernier sans le marquer comme lu.
 - **`summarize_mail.py`** envoie le corps du dernier mail (Gmail et Zimbra) à Azure OpenAI et écrit un résumé d'une phrase dans le JSON.

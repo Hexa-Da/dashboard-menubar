@@ -1,24 +1,29 @@
 #!/usr/bin/env python3
 """
-Dashboard Update — Script autonome
+Dashboard Update — Collecte Calendar / Gmail / Zimbra
 
 Collecte :
   - Google Calendar et Gmail via gws CLI ;
   - Zimbra (messagerie UL) via IMAP (zimbra_unread.fetch_zimbra_mailbox).
 
-Écrit le résultat dans dashboard.json, puis lance summarize_mail.py si un
-dernier mail (Gmail ou Zimbra) n'a pas encore de résumé Azure OpenAI.
+Écrit le résultat dans dashboard.json, puis appelle summarize_mail.main()
+in-process si un dernier mail (Gmail ou Zimbra) n'a pas encore de résumé
+Azure OpenAI.
 
-Lancé toutes les 1 min par menubar.py (ou manuellement pour test).
+Appelé in-process par menubar.py toutes les 1 min (ou manuellement :
+`python dashboard_update.py`).
 """
 
 import base64
+import contextlib
 import json
 import os
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+
+import summarize_mail
 
 from gws_errors import (
     auth_status_indicates_error,
@@ -348,21 +353,18 @@ def main() -> None:
           f"{unread_zimbra} zimbra, {connectivity}, {now_local}")
 
     # ── Summarize latest mail via Azure OpenAI (Gmail + Zimbra) ──
-    # On lance summarize_mail.py si l'un des deux derniers mails a un corps
-    # mais pas encore de résumé. Le script boucle sur les deux côtés.
+    # Appel in-process si l'un des deux derniers mails a un corps mais pas
+    # encore de résumé. stdout masqué (résumés hors journal de collecte).
     def _needs_summary(m) -> bool:
         return (isinstance(m, dict)
                 and not m.get("summary")
                 and bool(m.get("body") or m.get("snippet")))
 
     if _needs_summary(latest_unread) or _needs_summary(latest_unread_zimbra):
-        script: str = os.path.join(os.path.dirname(os.path.abspath(__file__)), "summarize_mail.py")
         try:
-            subprocess.run(
-                [sys.executable, script],
-                stdout=subprocess.DEVNULL,
-                timeout=60,
-            )
+            with open(os.devnull, "w", encoding="utf-8") as devnull:
+                with contextlib.redirect_stdout(devnull):
+                    summarize_mail.main()
         except Exception as e:
             print(f"Summarize error: {e}", file=sys.stderr)
 
