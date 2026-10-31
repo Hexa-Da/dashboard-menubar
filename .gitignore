@@ -6,7 +6,7 @@ __pycache__/
 logs/
 dashboard.json
 
-### Worklow IA ###
+### Agentic Workflow ###
 .cursor
 memoire
 tasks
